@@ -35,7 +35,16 @@ HttpURLConnection). iPhone zatím ne - viz dole.
 ## Sestavení
 
 GitHub Actions (`.github/workflows/build.yml`) postaví při každém pushi
-testovací `app-debug.apk` (artefakt běhu); značka `v*` udělá vydání na GitHubu.
+testovací `app-debug.apk` (artefakt běhu) a obnoví „plovoucí“ vydání
+**android-latest**: `Kine-Clipper.apk` (podepsané, když je klíč; jinak testovací
+sestavení pod stejným názvem), `Kine-Clipper-debug.apk` a `latest.json` (verze,
+datum, velikost). Na ten soubor odkazuje web Kine - stránka `/download` (záložka
+Android, na telefonu předvybraná) a přesměrování `/download/android`:
+`https://github.com/<repo>/releases/download/android-latest/Kine-Clipper.apk`.
+Značka `v*` udělá navíc pojmenované vydání. Když jsou v repu stejné R2 proměnné
+jako v kine-desktop (`DESKTOP_DOWNLOAD_BASE` + `R2_*` secrets), nahraje se APK i
+do úložiště do složky `android/` (pak na Vercelu
+`NEXT_PUBLIC_ANDROID_DOWNLOAD_BASE=<base>/android`).
 Ostré podepsané APK vznikne, když jsou v Settings -> Secrets:
 `KEYSTORE_BASE64` (keystore zakódovaný base64), `KEYSTORE_PASSWORD`,
 `KEY_ALIAS`, `KEY_PASSWORD`. Klíč se dělá jednou:
@@ -48,7 +57,8 @@ Android SDK 35).
 
 ## Test na telefonu
 
-1. Stáhni `app-debug.apk` z běhu Actions (Artifacts) do telefonu a nainstaluj
+1. Na telefonu otevři playkine.com/download (záložka Android) a stáhni
+   `Kine-Clipper.apk` - nebo `app-debug.apk` z běhu Actions (Artifacts). Nainstaluj
    (povolit „instalovat neznámé aplikace“ pro prohlížeč / správce souborů).
 2. Otevři Kine Clipper -> Přihlásit přes Kine (prohlížeč, jedno klepnutí).
 3. Zapni kameru (přední), bublinu, Spustit -> povolit nahrávání obrazovky.
