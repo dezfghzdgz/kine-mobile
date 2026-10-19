@@ -39,14 +39,86 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kine.keystore"
           KINE_KEYSTORE="$RUNNER_TEMP/kine.keystore" gradle :app:assembleRelease --no-daemon --stacktrace
           cp app/build/outputs/apk/release/app-release.apk Kine-Clipper.apk
+      # Soubory ke stažení: Kine-Clipper.apk = podepsané vydání, když je klíč, jinak testovací
+      # (debug) APK pod stejným názvem - web (/download/android) odkazuje vždycky na stejný soubor.
+      # latest.json vedle něj čte web Kine (verze, datum, velikost) pro stránku /download.
+      - name: Připravit soubory ke stažení
+        shell: bash
+        run: |
+          set -e
+          cp app/build/outputs/apk/debug/app-debug.apk Kine-Clipper-debug.apk
+          signed=true
+          if [ ! -f Kine-Clipper.apk ]; then cp Kine-Clipper-debug.apk Kine-Clipper.apk; signed=false; fi
+          version=$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          code=$(sed -n 's/.*versionCode *= *\([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          size=$(stat -c %s Kine-Clipper.apk)
+          printf '{ "version": "%s", "versionCode": %s, "publishedAt": "%s", "sizeBytes": %s, "file": "Kine-Clipper.apk", "signed": %s, "commit": "%s" }\n' \
+            "${version:-0.0.0}" "${code:-0}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$size" "$signed" "$GITHUB_SHA" > latest.json
+          cat latest.json
+          if [ "$signed" = true ]; then kind="podepsané"; else kind="testovací, bez klíče"; fi
+          echo "### Kine Clipper pro Android ${version} (${kind}) - $((size / 1024 / 1024)) MB" >> "$GITHUB_STEP_SUMMARY"
+      # „Plovoucí“ vydání android-latest: při každém pushi na main se obnoví (stejná adresa pořád
+      # míří na nejnovější APK) - web Kine odkazuje na
+      # https://github.com/<repo>/releases/download/android-latest/Kine-Clipper.apk a čte latest.json.
+      - name: Vydání android-latest (nejnovější APK)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -e
+          git tag -f android-latest "$GITHUB_SHA"
+          git push -f origin android-latest
+          notes="Nejnovější Kine Clipper pro Android (sestavení z větve main, $(date -u +%Y-%m-%d)). Kine-Clipper.apk = ke stažení z webu Kine (/download/android); Kine-Clipper-debug.apk = testovací sestavení. Instalace mimo Google Play: po stažení soubor otevři a povol instalaci z tohoto zdroje."
+          if gh release view android-latest >/dev/null 2>&1; then
+            gh release edit android-latest --prerelease --title "Kine Clipper pro Android - nejnovější" --notes "$notes"
+          else
+            gh release create android-latest --prerelease --title "Kine Clipper pro Android - nejnovější" --notes "$notes"
+          fi
+          for i in 1 2 3; do
+            if gh release upload android-latest Kine-Clipper.apk Kine-Clipper-debug.apk latest.json --clobber; then break; fi
+            echo "nahrání se nepovedlo (pokus $i), zkouším znovu…"; sleep 15
+            [ "$i" = 3 ] && exit 1
+          done
+          echo "nahráno: https://github.com/$GITHUB_REPOSITORY/releases/download/android-latest/Kine-Clipper.apk"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Naše úložiště (Cloudflare R2) - stejné proměnné jako v repu kine-desktop
+      # (DESKTOP_DOWNLOAD_BASE + R2_* secrets), složka android/. Bez nich se přeskočí
+      # a web stahuje z GitHubu. Když se zapne, nastav na Vercelu
+      # NEXT_PUBLIC_ANDROID_DOWNLOAD_BASE=<DESKTOP_DOWNLOAD_BASE>/android.
+      - name: Nahrát do Cloudflare R2 (android/)
+        if: ${{ vars.DESKTOP_DOWNLOAD_BASE != '' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}
+        shell: bash
+        run: |
+          set -e
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET" ] || [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
+            echo "::warning::DESKTOP_DOWNLOAD_BASE je nastavené, ale chybí R2_* secrets - APK zůstává jen na GitHubu."
+            exit 0
+          fi
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION=auto
+          export AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+          EP="https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com"
+          put() {
+            for i in 1 2 3; do
+              if aws s3 cp "$1" "s3://$R2_BUCKET/$2" --endpoint-url "$EP" --content-type "$3" --cache-control "$4"; then return 0; fi
+              echo "nahrání $2 se nepovedlo (pokus $i), zkouším znovu…"; sleep 10
+            done
+            return 1
+          }
+          put Kine-Clipper.apk android/Kine-Clipper.apk application/vnd.android.package-archive "public, max-age=300"
+          put latest.json android/latest.json application/json "no-cache"
+          echo "### R2: $DESKTOP_DOWNLOAD_BASE/android/Kine-Clipper.apk nahráno" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          DESKTOP_DOWNLOAD_BASE: ${{ vars.DESKTOP_DOWNLOAD_BASE }}
+      # Značka v* = pojmenované vydání navíc (zůstává, android-latest se přepisuje).
       - name: Vydání na GitHubu (jen značka v*)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           set -e
-          cp app/build/outputs/apk/debug/app-debug.apk Kine-Clipper-debug.apk
-          files="Kine-Clipper-debug.apk"
-          [ -f Kine-Clipper.apk ] && files="$files Kine-Clipper.apk"
-          gh release create "$GITHUB_REF_NAME" $files --title "Kine Clipper $GITHUB_REF_NAME" --notes "Kine Clipper pro Android $GITHUB_REF_NAME. Kine-Clipper.apk = podepsané vydání (když je klíč), Kine-Clipper-debug.apk = testovací." || gh release upload "$GITHUB_REF_NAME" $files --clobber
+          gh release create "$GITHUB_REF_NAME" Kine-Clipper.apk Kine-Clipper-debug.apk latest.json --title "Kine Clipper $GITHUB_REF_NAME" --notes "Kine Clipper pro Android $GITHUB_REF_NAME. Kine-Clipper.apk = ke stažení (podepsané, když je klíč; jinak testovací sestavení), Kine-Clipper-debug.apk = testovací." || gh release upload "$GITHUB_REF_NAME" Kine-Clipper.apk Kine-Clipper-debug.apk latest.json --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
