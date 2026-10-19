@@ -1,0 +1,50 @@
+name: Sestavení APK
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+      # Testovací APK (podepsané vývojovým klíčem runneru) - do telefonu přes "instalovat neznámé aplikace".
+      - name: Sestavení (debug)
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kine-Clipper-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+      # Ostré APK jen s klíčem v tajemstvích (KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD) - viz README.
+      - name: Sestavení (release, podepsané)
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kine.keystore"
+          KINE_KEYSTORE="$RUNNER_TEMP/kine.keystore" gradle :app:assembleRelease --no-daemon --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk Kine-Clipper.apk
+      - name: Vydání na GitHubu (jen značka v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -e
+          cp app/build/outputs/apk/debug/app-debug.apk Kine-Clipper-debug.apk
+          files="Kine-Clipper-debug.apk"
+          [ -f Kine-Clipper.apk ] && files="$files Kine-Clipper.apk"
+          gh release create "$GITHUB_REF_NAME" $files --title "Kine Clipper $GITHUB_REF_NAME" --notes "Kine Clipper pro Android $GITHUB_REF_NAME. Kine-Clipper.apk = podepsané vydání (když je klíč), Kine-Clipper-debug.apk = testovací." || gh release upload "$GITHUB_REF_NAME" $files --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
