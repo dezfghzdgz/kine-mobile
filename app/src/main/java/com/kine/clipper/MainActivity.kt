@@ -166,7 +166,10 @@ class MainActivity : Activity() {
             return
         }
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION)
+        // Android 14+: v okně systému jde vybrat „jedna aplikace“ - nahrává se jen hra, bublina ani
+        // oznámení v klipu nejsou (kameru skládá appka sama, ta zůstane). Starší Android: celá obrazovka.
+        val intent = if (Build.VERSION.SDK_INT >= 34) mpm.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForUserChoice()) else mpm.createScreenCaptureIntent()
+        startActivityForResult(intent, REQ_PROJECTION)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -289,6 +292,10 @@ class MainActivity : Activity() {
             settings.bubble = on
             if (on && !SysSettings.canDrawOverlays(this)) startActivity(Intent(SysSettings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         })
+        // Bublina nenápadná (tečka, co po chvíli zprůhlední) / plné tlačítko; zatřesení = klip (nic v obraze).
+        root.addView(spinnerRow(R.string.bubble_style, listOf(getString(R.string.bubble_discreet), getString(R.string.bubble_normal)), if (settings.bubbleStyle == "normal") 1 else 0) { i -> settings.bubbleStyle = if (i == 1) "normal" else "discreet" })
+        root.addView(switchRow(R.string.shake_to_clip, settings.shakeToClip) { settings.shakeToClip = it })
+        root.addView(TextView(this).apply { text = getString(if (Build.VERSION.SDK_INT >= 34) R.string.hide_bubble_hint_14 else R.string.hide_bubble_hint); textSize = 12f; alpha = 0.6f })
 
         // Kamera
         root.addView(header(R.string.section_camera))

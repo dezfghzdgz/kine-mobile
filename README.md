@@ -62,9 +62,29 @@ Android SDK 35).
    (povolit „instalovat neznámé aplikace“ pro prohlížeč / správce souborů).
 2. Otevři Kine Clipper -> Přihlásit přes Kine (prohlížeč, jedno klepnutí).
 3. Zapni kameru (přední), bublinu, Spustit -> povolit nahrávání obrazovky.
+   Android 14+: v okně systému zvol **Jedna aplikace** (hra) - bublina ani
+   oznámení pak v klipu nejsou vůbec; kameru skládá appka sama, ta zůstává.
 4. Přepni do hry, hraj, klepni na bublinu -> klip je v Galerii (Movies/Kine)
    a v appce; Nahrát -> na Kine.
 5. Když je kamera na boku: Otočení kamery (0 / 90 / 180 / 270).
+
+### Tlačítko, které v klipu není vidět (0.2.0)
+
+- **Nenápadná bublina** (výchozí): malá tečka, po 1,5 s klidu zprůhlední na čtvrtinu
+  a po dotyku se zase rozsvítí - v klipu je sotva vidět, prst ji trefí (plocha 56 dp).
+  „Plné tlačítko“ je v nastavení.
+- **Zatřesení = klip** (nastavení, výchozí vypnuto): dvě rázná trhnutí telefonem
+  během 0,7 s uloží klip; na obrazovce není nic, v klipu není nic. Akcelerometr
+  běží jen při snímání.
+- **Jen hra** (Android 14+): systém nahrává jen jednu aplikaci, překryvy jiných
+  appek (bublina, oznámení) v záznamu nejsou. Starší Android umí jen celou
+  obrazovku - tam pomůže nenápadná bublina nebo zatřesení.
+
+### Nenáročnost (0.2.0)
+
+Výchozí 720p / 30 fps / 5 Mb/s (1080p a 60 fps jdou zapnout), kamera nejvýš 480p
+(v obraze je malá), obraz se skládá jen když se něco změní (nejvýš fps za sekundu)
+a kodéry jsou hardwarové. Klip = překopírování posledních sekund (bez překódování).
 
 ## Co zatím chybí / omezení
 

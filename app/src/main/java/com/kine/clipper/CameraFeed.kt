@@ -16,7 +16,7 @@ import android.util.Size
 import android.view.Surface
 
 /**
- * Kamera do klipu (Camera2): přední nebo zadní, náhled 16:9 do 720p rovnou do
+ * Kamera do klipu (Camera2): přední nebo zadní, náhled 16:9 do 480p rovnou do
  * SurfaceTexture kompozitoru. Když kameru drží jiná appka nebo se odpojí,
  * zkouší se znovu každých 10 s; klip se mezitím nahrává bez ní.
  */
@@ -52,12 +52,15 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
         }
     }
 
-    /** Nejvýš 720p, nejradši 16:9, jinak největší, co se vejde (kamera je v obraze malá). */
+    /**
+     * Nejvýš 480p, nejradši 16:9, jinak největší, co se vejde. Kamera je v obraze malá
+     * (nejvýš polovina šířky klipu v 720p), víc pixelů by jen hřálo telefon.
+     */
     private fun chooseSize(sizes: List<Size>): Size {
-        val fitting = sizes.filter { it.height <= 720 && it.width <= 1280 }
+        val fitting = sizes.filter { it.height <= 480 && it.width <= 864 }
         val wide = fitting.filter { kotlin.math.abs(it.width.toFloat() / it.height - 16f / 9f) < 0.05f }
         val pool = if (wide.isNotEmpty()) wide else if (fitting.isNotEmpty()) fitting else sizes
-        return pool.maxByOrNull { it.width * it.height } ?: Size(1280, 720)
+        return pool.maxByOrNull { it.width * it.height } ?: Size(640, 480)
     }
 
     @SuppressLint("MissingPermission")

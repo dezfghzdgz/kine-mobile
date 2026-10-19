@@ -76,4 +76,10 @@
     <string name="about_text">Klipy z her s tvojí kamerou, uložené do Galerie a nahrané na Kine. Stejná pravidla jako appka do PC.</string>
     <string name="clip_seconds_value">%1$d s</string>
     <string name="while_recording_hint">Nahrávání běží na pozadí - přepni do hry. Změny tady platí po Zastavit / Spustit.</string>
+    <string name="bubble_style">Vzhled bubliny</string>
+    <string name="bubble_discreet">Nenápadná (tečka, po chvíli zprůhlední)</string>
+    <string name="bubble_normal">Plné tlačítko</string>
+    <string name="shake_to_clip">Zatřesení telefonem = uložit klip (nic na obrazovce)</string>
+    <string name="hide_bubble_hint_14">Aby bublina nebyla v klipu: v okně systému zvol „Jedna aplikace“ (nahrává se jen hra). Nebo zapni Zatřesení = klip a bublinu vypni.</string>
+    <string name="hide_bubble_hint">Android 14 a novější umí nahrávat jen jednu aplikaci - bublina pak v klipu není. Tady: nenápadná bublina zprůhlední na tečku, nebo Zatřesení = klip.</string>
 </resources>

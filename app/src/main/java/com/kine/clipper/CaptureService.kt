@@ -4,6 +4,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
@@ -57,6 +61,7 @@ class CaptureService : Service() {
     private var camera: CameraFeed? = null
     private var audio: AudioCapture? = null
     private var bubble: Bubble? = null
+    private var shake: ShakeDetector? = null
     @Volatile private var clipInProgress = false
     private var stopping = false
     private var encodeWidth = 0
@@ -190,7 +195,11 @@ class CaptureService : Service() {
                     Log.i("zvuk: hra ${ac.gameOn}, mikrofon ${ac.micOn}")
                 }
                 if (settings.bubble && SysSettings.canDrawOverlays(this)) {
-                    bubble = Bubble(this) { clipNow() }.also { it.show() }
+                    bubble = Bubble(this, { clipNow() }, settings.bubbleStyle != "normal").also { it.show() }
+                }
+                // Zatřesení = klip: nic na obrazovce, v klipu není vidět vůbec nic.
+                if (settings.shakeToClip) {
+                    shake = ShakeDetector(this) { clipNow() }.also { it.start() }
                 }
                 statusText = getString(R.string.status_running, settings.clipSeconds)
                 updateNotification()
@@ -309,6 +318,8 @@ class CaptureService : Service() {
         running = false
         bubble?.hide()
         bubble = null
+        shake?.stop()
+        shake = null
         // Pořadí: zdroje -> displej -> skládání -> kodéry -> zásobník -> projekce.
         try { audio?.stop() } catch (e: Exception) { Log.w("stop zvuk: ${e.message}") }
         try { camera?.close() } catch (e: Exception) { Log.w("stop kamera: ${e.message}") }
@@ -337,4 +348,52 @@ class CaptureService : Service() {
         workThread?.quitSafely()
         super.onDestroy()
     }
+}
+
+/**
+ * Zatřesení telefonem = klip. Dvě rázná trhnutí (zrychlení přes ~2,4 g nad tíhu) během
+ * 700 ms, pak 3 s klid - jedno škubnutí při hraní to nespustí. Akcelerometr běží jen
+ * během snímání (SENSOR_DELAY_GAME, pár mW).
+ */
+class ShakeDetector(context: Context, private val onShake: () -> Unit) : SensorEventListener {
+    private val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private val sensor: Sensor? = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private var firstPeakAt = 0L
+    private var lastFiredAt = 0L
+    private var above = false
+
+    fun start() {
+        val s = sensor ?: run { Log.w("zatřesení: telefon nemá akcelerometr"); return }
+        sm.registerListener(this, s, SensorManager.SENSOR_DELAY_GAME)
+    }
+
+    fun stop() {
+        sm.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(e: SensorEvent) {
+        val g = SensorManager.GRAVITY_EARTH
+        val x = e.values[0] / g
+        val y = e.values[1] / g
+        val z = e.values[2] / g
+        val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble())
+        val now = System.currentTimeMillis()
+        val strong = magnitude > 3.4
+        if (strong && !above) {
+            above = true
+            if (now - firstPeakAt <= 700 && firstPeakAt > 0) {
+                firstPeakAt = 0
+                if (now - lastFiredAt > 3000) {
+                    lastFiredAt = now
+                    onShake()
+                }
+            } else {
+                firstPeakAt = now
+            }
+        } else if (!strong && magnitude < 1.6) {
+            above = false
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) { }
 }

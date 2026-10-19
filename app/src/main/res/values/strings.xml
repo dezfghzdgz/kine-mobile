@@ -76,4 +76,10 @@
     <string name="about_text">Clips from your games with your camera, saved to Gallery and uploaded to Kine. The same rules as the PC app.</string>
     <string name="clip_seconds_value">%1$d s</string>
     <string name="while_recording_hint">Recording runs in the background - switch to your game. Changes here apply after Stop / Start.</string>
+    <string name="bubble_style">Bubble look</string>
+    <string name="bubble_discreet">Discreet (small dot, fades out)</string>
+    <string name="bubble_normal">Full button</string>
+    <string name="shake_to_clip">Shake the phone = save clip (nothing on screen)</string>
+    <string name="hide_bubble_hint_14">Keep the bubble out of clips: in the system dialog choose “A single app” (only the game is recorded). Or turn on Shake = clip and hide the bubble.</string>
+    <string name="hide_bubble_hint">On Android 14+ the system can record a single app only, so the bubble is not in the clip. Here: the discreet bubble fades to a faint dot, or use Shake = clip.</string>
 </resources>

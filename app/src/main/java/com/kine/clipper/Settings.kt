@@ -18,17 +18,20 @@ class Settings(context: Context) {
         get() = p.getInt("clipSeconds", 30).coerceIn(10, 120)
         set(v) = p.edit().putInt("clipSeconds", v.coerceIn(10, 120)).apply()
 
-    /** Výška obrazu: 720 nebo 1080 (podle obrazovky se dopočítá šířka). */
+    /**
+     * Výška obrazu: 720 nebo 1080 (podle obrazovky se dopočítá šířka). Výchozí 720 - na
+     * telefonu je rozdíl v klipu malý, ale kodér i baterie to pozná (1080 jde zapnout).
+     */
     var maxHeight: Int
-        get() = p.getInt("maxHeight", 1080)
+        get() = p.getInt("maxHeight", 720)
         set(v) = p.edit().putInt("maxHeight", v).apply()
 
     var fps: Int
         get() = p.getInt("fps", 30).coerceIn(15, 60)
         set(v) = p.edit().putInt("fps", v.coerceIn(15, 60)).apply()
 
-    /** Datový tok obrazu v Mb/s (výchozí podle výšky). */
-    val videoMbps: Int get() = if (maxHeight >= 1080) 10 else 6
+    /** Datový tok obrazu v Mb/s (výchozí podle výšky; 60 fps o třetinu víc). */
+    val videoMbps: Int get() = (if (maxHeight >= 1080) 9 else 5) * (if (fps > 40) 4 else 3) / 3
 
     /** Kamera v klipu: "off" / "front" / "back". */
     var camera: String
@@ -72,6 +75,20 @@ class Settings(context: Context) {
     var bubble: Boolean
         get() = p.getBoolean("bubble", true)
         set(v) = p.edit().putBoolean("bubble", v).apply()
+
+    /**
+     * Vzhled bubliny: "discreet" = malá tečka, která po chvíli klidu zprůhlední (v klipu je
+     * skoro vidět není), "normal" = plné tlačítko. Na Androidu 14+ s volbou „jedna aplikace“
+     * v okně systému bublina v záznamu není vůbec.
+     */
+    var bubbleStyle: String
+        get() = p.getString("bubbleStyle", "discreet") ?: "discreet"
+        set(v) = p.edit().putString("bubbleStyle", v).apply()
+
+    /** Zatřesení telefonem = uložit klip (bez čehokoli na obrazovce, v klipu není nic vidět). */
+    var shakeToClip: Boolean
+        get() = p.getBoolean("shakeToClip", false)
+        set(v) = p.edit().putBoolean("shakeToClip", v).apply()
 
     /** Klipy nahrát na Kine samy, až snímání skončí (ne během hry). */
     var autoUpload: Boolean
