@@ -9,17 +9,22 @@ import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 
 /**
- * Zvuk do klipu: zvuk hry (AudioPlaybackCapture - co hraje telefon, Android
- * 10+; hra to může zakázat, pak je ticho) a mikrofon, smíchané do jedné
- * stereo stopy 48 kHz pro kodér AAC. Hodiny: zvuk hry (čte se blokově),
- * mikrofon se k němu přimíchá, kolik ho zrovna je; bez zvuku hry jsou hodinami
- * mikrofon.
+ * Zvuk do klipu: zvuk hry (AudioPlaybackCapture - co hraje telefon; hra to může
+ * zakázat, pak je ticho) a mikrofon, smíchané do jedné stereo stopy pro kodér AAC.
+ * Vzorkování 48 kHz, a když ho mikrofon neumí (starší telefony), 44,1 kHz pro obojí.
+ * Hodiny: zvuk hry (čte se blokově), mikrofon se k němu přimíchá, kolik ho zrovna je;
+ * bez zvuku hry jsou hodinami mikrofon. Chyba zvuku nikdy neshodí nahrávání obrazu.
  */
-class AudioCapture(private val projection: MediaProjection, private val useGame: Boolean, private val useMic: Boolean, private val encoder: AudioEncoder) {
+class AudioCapture(private val projection: MediaProjection, private val useGame: Boolean, private val useMic: Boolean) {
     private var game: AudioRecord? = null
     private var mic: AudioRecord? = null
     @Volatile private var running = false
     private var thread: Thread? = null
+    private var encoder: AudioEncoder? = null
+
+    /** Vzorkování, na kterém se zdroje opravdu otevřely. */
+    var rate = 48_000
+        private set
     /** Co se opravdu podařilo otevřít. */
     var gameOn = false
         private set
@@ -27,49 +32,80 @@ class AudioCapture(private val projection: MediaProjection, private val useGame:
         private set
 
     companion object {
-        const val RATE = 48_000
         const val FRAMES = 1024
     }
 
+    /** Otevře zdroje (48 kHz, jinak 44,1 kHz). False = žádný zvuk nejde. */
+    fun open(): Boolean {
+        for (r in intArrayOf(48_000, 44_100)) {
+            val ok = tryOpen(r)
+            // Mikrofon chtěný, ale v 48 kHz nejde - zkusit všechno v 44,1 kHz.
+            if (ok && (!useMic || mic != null || r == 44_100)) {
+                rate = r
+                return true
+            }
+            releaseAll()
+        }
+        return false
+    }
+
     @SuppressLint("MissingPermission")
-    fun start() {
-        val stereo = AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_IN_STEREO).build()
-        val stereoMin = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+    private fun tryOpen(r: Int): Boolean {
+        val stereo = AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(r).setChannelMask(AudioFormat.CHANNEL_IN_STEREO).build()
         if (useGame) {
             try {
+                val stereoMin = AudioRecord.getMinBufferSize(r, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
                 val config = AudioPlaybackCaptureConfiguration.Builder(projection)
                     .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                     .addMatchingUsage(AudioAttributes.USAGE_GAME)
                     .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                     .build()
-                val r = AudioRecord.Builder().setAudioPlaybackCaptureConfig(config).setAudioFormat(stereo).setBufferSizeInBytes(maxOf(stereoMin * 4, FRAMES * 4 * 8)).build()
-                if (r.state == AudioRecord.STATE_INITIALIZED) {
-                    game = r
+                val rec = AudioRecord.Builder().setAudioPlaybackCaptureConfig(config).setAudioFormat(stereo)
+                    .setBufferSizeInBytes(maxOf(stereoMin * 2, FRAMES * 4 * 8)).build()
+                if (rec.state == AudioRecord.STATE_INITIALIZED) {
+                    game = rec
                     gameOn = true
                 } else {
-                    r.release()
-                    Log.w("zvuk hry: AudioRecord se nepodařilo připravit")
+                    rec.release()
+                    Log.w("zvuk hry ($r Hz): AudioRecord se nepodařilo připravit")
                 }
             } catch (e: Exception) {
-                Log.e("zvuk hry nejde zachytit", e)
+                Log.e("zvuk hry nejde zachytit ($r Hz)", e)
             }
         }
         if (useMic) {
             try {
-                val monoMin = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-                val r = AudioRecord(MediaRecorder.AudioSource.MIC, RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(monoMin * 4, FRAMES * 2 * 8))
-                if (r.state == AudioRecord.STATE_INITIALIZED) {
-                    mic = r
-                    micOn = true
-                } else {
-                    r.release()
-                    Log.w("mikrofon: AudioRecord se nepodařilo připravit")
-                }
+                val monoMin = AudioRecord.getMinBufferSize(r, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                if (monoMin > 0) {
+                    val rec = AudioRecord(MediaRecorder.AudioSource.MIC, r, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(monoMin * 2, FRAMES * 2 * 8))
+                    if (rec.state == AudioRecord.STATE_INITIALIZED) {
+                        mic = rec
+                        micOn = true
+                    } else {
+                        rec.release()
+                        Log.w("mikrofon ($r Hz): AudioRecord se nepodařilo připravit")
+                    }
+                } else Log.w("mikrofon: $r Hz telefon neumí")
             } catch (e: Exception) {
-                Log.e("mikrofon nejde otevřít", e)
+                Log.e("mikrofon nejde otevřít ($r Hz)", e)
             }
         }
+        return game != null || mic != null
+    }
+
+    private fun releaseAll() {
+        try { game?.release() } catch (_: Exception) { }
+        try { mic?.release() } catch (_: Exception) { }
+        game = null
+        mic = null
+        gameOn = false
+        micOn = false
+    }
+
+    /** Spustí čtení do kodéru (na vlastním vlákně). */
+    fun start(encoder: AudioEncoder) {
         if (game == null && mic == null) return
+        this.encoder = encoder
         running = true
         thread = Thread({ loop() }, "kine-audio").also { it.start() }
     }
@@ -77,12 +113,14 @@ class AudioCapture(private val projection: MediaProjection, private val useGame:
     private fun loop() {
         val g = game
         val m = mic
+        val enc = encoder ?: return
         try {
             g?.startRecording()
             m?.startRecording()
         } catch (e: Exception) {
             Log.e("zvuk: start", e)
             running = false
+            releaseAll()
             return
         }
         val stereoBytes = FRAMES * 2 * 2
@@ -90,58 +128,59 @@ class AudioCapture(private val projection: MediaProjection, private val useGame:
         val micMono = ByteArray(FRAMES * 2 * 2)
         val out = ByteArray(stereoBytes)
         var micCarry = 0
-        while (running) {
-            var n: Int
-            if (g != null) {
-                n = g.read(gameBuf, 0, stereoBytes)
-                if (n <= 0) {
-                    if (n < 0) {
-                        Log.w("zvuk hry: čtení vrátilo $n")
-                        Thread.sleep(20)
-                    }
-                    continue
-                }
-            } else {
-                // Hodinami je mikrofon (mono) - přečte se blokově tolik snímků, kolik má stereo kousek.
-                n = m!!.read(micMono, 0, FRAMES * 2)
-                if (n <= 0) {
-                    if (n < 0) Thread.sleep(20)
-                    continue
-                }
-                upmix(micMono, n, out)
-                encoder.write(out, n * 2, ptsFor(n / 2))
-                continue
-            }
-            // Čas prvního vzorku: teď minus délka kousku (čtení vrací, co už dohrálo).
-            val frames = n / 4
-            val pts = ptsFor(frames)
-            if (m != null) {
-                // Mikrofon neblokově: přimíchat, kolik ho je (zbytek čeká na příště).
-                val want = frames * 2 - micCarry
-                val got = if (want > 0) m.read(micMono, micCarry, want, AudioRecord.READ_NON_BLOCKING) else 0
-                val have = micCarry + (if (got > 0) got else 0)
-                val micFrames = minOf(have / 2, frames)
-                mix(gameBuf, n, micMono, micFrames, out)
-                // Co zbylo (mikrofon předběhl), přesunout na začátek.
-                val used = micFrames * 2
-                micCarry = have - used
-                if (micCarry > 0) System.arraycopy(micMono, used, micMono, 0, micCarry)
-                encoder.write(out, n, pts)
-            } else {
-                encoder.write(gameBuf, n, pts)
-            }
-        }
+        var errors = 0
         try {
-            g?.stop()
-            m?.stop()
-        } catch (_: Exception) {
-            // nevadí
+            while (running) {
+                if (g != null) {
+                    val n = g.read(gameBuf, 0, stereoBytes)
+                    if (n <= 0) {
+                        if (n < 0) {
+                            if (++errors == 1 || errors % 200 == 0) Log.w("zvuk hry: čtení vrátilo $n")
+                            Thread.sleep(20)
+                        }
+                        continue
+                    }
+                    // Čas prvního vzorku: teď minus délka kousku (čtení vrací, co už dohrálo).
+                    val frames = n / 4
+                    val pts = ptsFor(frames)
+                    if (m != null) {
+                        // Mikrofon neblokově: přimíchat, kolik ho je (zbytek čeká na příště).
+                        val want = frames * 2 - micCarry
+                        val got = if (want > 0) m.read(micMono, micCarry, want, AudioRecord.READ_NON_BLOCKING) else 0
+                        val have = micCarry + (if (got > 0) got else 0)
+                        val micFrames = minOf(have / 2, frames)
+                        mix(gameBuf, n, micMono, micFrames, out)
+                        // Co zbylo (mikrofon předběhl), přesunout na začátek.
+                        val used = micFrames * 2
+                        micCarry = have - used
+                        if (micCarry > 0) System.arraycopy(micMono, used, micMono, 0, micCarry)
+                        enc.write(out, n, pts)
+                    } else {
+                        enc.write(gameBuf, n, pts)
+                    }
+                } else {
+                    // Hodinami je mikrofon (mono) - přečte se blokově tolik snímků, kolik má stereo kousek.
+                    val n = m!!.read(micMono, 0, FRAMES * 2)
+                    if (n <= 0) {
+                        if (n < 0) {
+                            if (++errors == 1 || errors % 200 == 0) Log.w("mikrofon: čtení vrátilo $n")
+                            Thread.sleep(20)
+                        }
+                        continue
+                    }
+                    upmix(micMono, n, out)
+                    enc.write(out, n * 2, ptsFor(n / 2))
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e("zvuk: smyčka", e)
         }
-        g?.release()
-        m?.release()
+        try { g?.stop() } catch (_: Exception) { }
+        try { m?.stop() } catch (_: Exception) { }
+        releaseAll()
     }
 
-    private fun ptsFor(frames: Int): Long = System.nanoTime() / 1000L - frames.toLong() * 1_000_000L / RATE
+    private fun ptsFor(frames: Int): Long = System.nanoTime() / 1000L - frames.toLong() * 1_000_000L / rate
 
     /** Mono 16 bit -> stereo (oba kanály stejně). */
     private fun upmix(mono: ByteArray, bytes: Int, out: ByteArray) {
@@ -172,8 +211,14 @@ class AudioCapture(private val projection: MediaProjection, private val useGame:
         }
     }
 
+    /** Konec: počká na vlákno (čtení se do ~20 ms vrátí). Když se zdroje nespustily, jen je uvolní. */
     fun stop() {
         running = false
-        thread?.join(1500)
+        val t = thread
+        if (t == null) {
+            releaseAll()
+            return
+        }
+        t.join(1200)
     }
 }

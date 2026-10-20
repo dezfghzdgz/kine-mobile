@@ -11,7 +11,7 @@ import android.content.SharedPreferences
 class Settings(context: Context) {
     private val p: SharedPreferences = context.getSharedPreferences("kine", Context.MODE_PRIVATE)
     /** Testovací sestavení smí mluvit s jakoukoli Kine (vývoj); ostré jen s oficiální - jako appka do PC. */
-    private val debuggable: Boolean = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    val debuggable: Boolean = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     /** Kolik sekund zpětně klip bere (zásobník drží o něco víc). */
     var clipSeconds: Int
@@ -19,19 +19,27 @@ class Settings(context: Context) {
         set(v) = p.edit().putInt("clipSeconds", v.coerceIn(10, 120)).apply()
 
     /**
-     * Výška obrazu: 720 nebo 1080 (podle obrazovky se dopočítá šířka). Výchozí 720 - na
-     * telefonu je rozdíl v klipu malý, ale kodér i baterie to pozná (1080 jde zapnout).
+     * Kvalita: "auto" (podle telefonu - starší 480p, ostatní 720p), "480", "720", "1080".
+     * Z 0.2.0 se ručně zapnuté 1080p převezme, jinak Auto.
      */
-    var maxHeight: Int
-        get() = p.getInt("maxHeight", 720)
-        set(v) = p.edit().putInt("maxHeight", v).apply()
+    var quality: String
+        get() = p.getString("quality", null) ?: if (p.getInt("maxHeight", 0) >= 1080) "1080" else "auto"
+        set(v) = p.edit().putString("quality", v).apply()
 
     var fps: Int
         get() = p.getInt("fps", 30).coerceIn(15, 60)
         set(v) = p.edit().putInt("fps", v.coerceIn(15, 60)).apply()
 
-    /** Datový tok obrazu v Mb/s (výchozí podle výšky; 60 fps o třetinu víc). */
-    val videoMbps: Int get() = (if (maxHeight >= 1080) 9 else 5) * (if (fps > 40) 4 else 3) / 3
+    /** Kratší strana obrazu v px pro tuhle kvalitu a telefon. */
+    fun shortSide(tier: Device.Tier): Int = when (quality) {
+        "480" -> 480
+        "720" -> 720
+        "1080" -> 1080
+        else -> if (tier == Device.Tier.LOW) 480 else 720
+    }
+
+    /** Snímky za sekundu: v Auto na starším telefonu vždy 30. */
+    fun targetFps(tier: Device.Tier): Int = if (quality == "auto" && tier == Device.Tier.LOW) 30 else fps
 
     /** Kamera v klipu: "off" / "front" / "back". */
     var camera: String
@@ -77,13 +85,21 @@ class Settings(context: Context) {
         set(v) = p.edit().putBoolean("bubble", v).apply()
 
     /**
-     * Vzhled bubliny: "discreet" = malá tečka, která po chvíli klidu zprůhlední (v klipu je
-     * skoro vidět není), "normal" = plné tlačítko. Na Androidu 14+ s volbou „jedna aplikace“
-     * v okně systému bublina v záznamu není vůbec.
+     * Vzhled bubliny: "button" = kulaté tlačítko (dobře vidět, výchozí), "edge" = tenký
+     * proužek u okraje (v klipu skoro není vidět). Starý „nenápadný“ vzhled z 0.2.0 byl
+     * moc průhledný - nový klíč, ať má každý zase dobře viditelné tlačítko.
      */
-    var bubbleStyle: String
-        get() = p.getString("bubbleStyle", "discreet") ?: "discreet"
-        set(v) = p.edit().putString("bubbleStyle", v).apply()
+    var bubbleLook: String
+        get() = p.getString("bubbleLook", "button") ?: "button"
+        set(v) = p.edit().putString("bubbleLook", v).apply()
+
+    /** Kde bublina je: okraj ("left" / "right") a výška (0 = nahoře, 1 = dole). */
+    var bubbleSide: String
+        get() = p.getString("bubbleSide", "right") ?: "right"
+        set(v) = p.edit().putString("bubbleSide", v).apply()
+    var bubbleY: Float
+        get() = p.getFloat("bubbleY", 0.3f).coerceIn(0f, 1f)
+        set(v) = p.edit().putFloat("bubbleY", v.coerceIn(0f, 1f)).apply()
 
     /** Zatřesení telefonem = uložit klip (bez čehokoli na obrazovce, v klipu není nic vidět). */
     var shakeToClip: Boolean

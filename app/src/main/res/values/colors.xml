@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="brand">#2EE6C4</color>
+    <color name="bg">#0B0C0E</color>
+    <color name="card">#16181C</color>
+    <color name="text">#F2F4F7</color>
+    <color name="dim">#A6ACB6</color>
     <color name="ic_launcher_background">#0A0A0B</color>
 </resources>

@@ -15,6 +15,8 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -34,17 +36,21 @@ data class CameraLayout(
 )
 
 /**
- * Skládání obrazu: obrazovka (z VirtualDisplay) + kamera (Camera2) do jednoho
- * snímku pro kodér (jeho vstupní Surface). OpenGL ES 2 na vlastním vlákně;
- * oba zdroje jdou přes SurfaceTexture (externí textury). Kreslí se, když
- * přijde nový snímek obrazovky nebo kamery, nejvýš `fps` za sekundu - když se
- * nic nehýbe, nekreslí se nic a kodér si poslední snímek opakuje sám.
+ * Skládání obrazu, jen když je v klipu kamera: obrazovka (z VirtualDisplay) + kamera
+ * (Camera2) do jednoho snímku pro kodér (jeho vstupní Surface). OpenGL ES 2 na vlastním
+ * vlákně; oba zdroje přes SurfaceTexture. Kreslí se, jen když přijde nový snímek,
+ * nejvýš `fps` za sekundu. Bez kamery se OpenGL vůbec nespouští (obrazovka jde rovnou
+ * do kodéru - méně práce pro starší telefony). Výstup jde vyměnit za běhu ([setOutput])
+ * - po otočení telefonu je nový kodér s otočeným rozměrem.
  */
-class GlCompositor(private val output: Surface, private val width: Int, private val height: Int, fps: Int, private val layout: () -> CameraLayout?) {
+class GlCompositor(private var output: Surface, width: Int, height: Int, fps: Int, private val layout: () -> CameraLayout?) {
     private val thread = HandlerThread("kine-gl")
     private lateinit var handler: Handler
+    @Volatile private var width = width
+    @Volatile private var height = height
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var context: EGLContext = EGL14.EGL_NO_CONTEXT
+    private var config: EGLConfig? = null
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var program = 0
     private var aPos = 0
@@ -55,29 +61,32 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
     private val textures = IntArray(2)
     private var screenTexture: SurfaceTexture? = null
     private var cameraTexture: SurfaceTexture? = null
-    /** Sem kreslí VirtualDisplay. */
-    @Volatile var screenSurface: Surface? = null
-        private set
-    /** Sem kreslí kamera (Camera2). */
-    @Volatile var cameraSurface: Surface? = null
-        private set
-    @Volatile private var screenNew = false
-    @Volatile private var cameraNew = false
-    @Volatile private var cameraLive = false
+    private var screenSurface: Surface? = null
+    private var cameraSurface: Surface? = null
+    private var screenNew = false
+    private var cameraNew = false
+    private var cameraLive = false
     private var renderPosted = false
     private var lastRenderNs = 0L
-    private val frameNs = 1_000_000_000L / fps.coerceIn(10, 60)
+    @Volatile private var frameNs = 1_000_000_000L / fps.coerceIn(10, 60)
     private val matrix = FloatArray(16)
     private val positions = floatBuffer(8)
     private val texCoords = floatBuffer(8)
     private val locals = floatBuffer(8).apply { put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)); position(0) }
+    private val quad = FloatArray(8)
+    private val vIn = FloatArray(4)
+    private val vOut = FloatArray(4)
     @Volatile private var running = false
+    /** Výstup se zrovna vyměňuje - snímky se jen odeberou, nekreslí se. */
+    private var paused = false
 
-    /** Spustí GL vlákno; `onReady` dostane povrchy pro obrazovku a kameru (na GL vlákně). */
-    fun start(cameraWidth: Int, cameraHeight: Int, onReady: (Surface, Surface) -> Unit) {
+    /** Spustí GL vlákno a počká na povrchy pro obrazovku a kameru (nejvýš [timeoutMs]). */
+    fun start(cameraWidth: Int, cameraHeight: Int, timeoutMs: Long = 4000): Pair<Surface, Surface> {
         thread.start()
         handler = Handler(thread.looper)
         running = true
+        val done = CountDownLatch(1)
+        var error: Exception? = null
         handler.post {
             try {
                 initEgl()
@@ -102,17 +111,68 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
                 cameraTexture = camera
                 screenSurface = Surface(screen)
                 cameraSurface = Surface(camera)
-                onReady(screenSurface!!, cameraSurface!!)
             } catch (e: Exception) {
-                Log.e("GL: start selhal", e)
+                error = e
             }
+            done.countDown()
+        }
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) throw IllegalStateException("OpenGL start timeout")
+        error?.let { throw it }
+        return screenSurface!! to cameraSurface!!
+    }
+
+    /** Kamera přestala dávat snímky (vypnutá, odpojená, horký telefon) - do obrazu se nekreslí. */
+    fun cameraStopped() {
+        if (!running) return
+        handler.post {
+            cameraLive = false
+            screenNew = true
+            scheduleRender()
         }
     }
 
-    /** Kamera přestala dávat snímky (vypnutá, odpojená) - do obrazu se nekreslí. */
-    fun cameraStopped() {
-        cameraLive = false
-        scheduleRender()
+    /** Méně snímků za sekundu (horký telefon). */
+    fun setMaxFps(fps: Int) {
+        frameNs = 1_000_000_000L / fps.coerceIn(10, 60)
+    }
+
+    /** Přestat kreslit do kodéru (před jeho výměnou). Počká, než doběhne rozkreslený snímek. */
+    fun pause() {
+        if (!running) return
+        val done = CountDownLatch(1)
+        handler.post {
+            paused = true
+            done.countDown()
+        }
+        done.await(1500, TimeUnit.MILLISECONDS)
+    }
+
+    /** Nový výstup (kodér s jiným rozměrem po otočení) a zase kreslit. */
+    fun setOutput(surface: Surface, w: Int, h: Int) {
+        if (!running) return
+        val done = CountDownLatch(1)
+        var error: Exception? = null
+        handler.post {
+            try {
+                val cfg = config ?: throw IllegalStateException("EGL config")
+                val fresh = EGL14.eglCreateWindowSurface(display, cfg, surface, intArrayOf(EGL14.EGL_NONE), 0)
+                if (fresh === EGL14.EGL_NO_SURFACE) throw IllegalStateException("eglCreateWindowSurface 0x" + Integer.toHexString(EGL14.eglGetError()))
+                if (!EGL14.eglMakeCurrent(display, fresh, fresh, context)) throw IllegalStateException("eglMakeCurrent")
+                if (eglSurface !== EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, eglSurface)
+                eglSurface = fresh
+                output = surface
+                width = w
+                height = h
+                screenTexture?.setDefaultBufferSize(w, h)
+                lastRenderNs = 0L
+                paused = false
+            } catch (e: Exception) {
+                error = e
+            }
+            done.countDown()
+        }
+        if (!done.await(2000, TimeUnit.MILLISECONDS)) throw IllegalStateException("OpenGL output timeout")
+        error?.let { throw it }
     }
 
     private fun scheduleRender() {
@@ -139,16 +199,20 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
                 cameraNew = false
                 camera.updateTexImage()
             }
+            // Při výměně kodéru se snímky jen odeberou (ať se VirtualDisplay nezasekne).
+            if (paused) return
             // Časy musí růst (kodér je bere jako čas snímku).
             if (pts <= lastRenderNs) pts = lastRenderNs + 1_000_000L
             lastRenderNs = pts
-            GLES20.glViewport(0, 0, width, height)
+            val w = width
+            val h = height
+            GLES20.glViewport(0, 0, w, h)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             screen.getTransformMatrix(matrix)
             drawQuad(textures[0], matrix, -1f, -1f, 1f, 1f, 0, false, 1f, 1f, false)
-            val cam = layout()
-            if (cam != null && cameraLive && cam.w > 0.02f && cam.h > 0.02f) {
+            val cam = if (cameraLive) layout() else null
+            if (cam != null && cam.w > 0.02f && cam.h > 0.02f) {
                 camera.getTransformMatrix(matrix)
                 val left = cam.x * 2f - 1f
                 val right = (cam.x + cam.w) * 2f - 1f
@@ -157,7 +221,7 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
                 // Ořez bez deformace: poměr kamery (po otočení) vs. poměr rámečku v px.
                 val rotated = cam.rotation % 180 != 0
                 val camAspect = if (rotated) cam.cameraHeight.toFloat() / cam.cameraWidth else cam.cameraWidth.toFloat() / cam.cameraHeight
-                val boxAspect = (cam.w * width) / (cam.h * height)
+                val boxAspect = (cam.w * w) / (cam.h * h)
                 var sx = 1f
                 var sy = 1f
                 if (camAspect > boxAspect) sx = boxAspect / camAspect else sy = camAspect / boxAspect
@@ -173,33 +237,30 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
     /**
      * Čtverec `left/bottom/right/top` v souřadnicích GL; souřadnice textury se
      * spočítají tady: ořez kolem středu (sx, sy), zrcadlo, otočení, pak
-     * transformace SurfaceTexture.
+     * transformace SurfaceTexture. Bez nových polí na každý snímek (méně práce pro GC).
      */
     private fun drawQuad(texture: Int, texMatrix: FloatArray, left: Float, bottom: Float, right: Float, top: Float, rotation: Int, mirror: Boolean, sx: Float, sy: Float, circle: Boolean) {
+        quad[0] = left; quad[1] = bottom; quad[2] = right; quad[3] = bottom
+        quad[4] = left; quad[5] = top; quad[6] = right; quad[7] = top
         positions.clear()
-        positions.put(floatArrayOf(left, bottom, right, bottom, left, top, right, top))
+        positions.put(quad)
         positions.position(0)
         texCoords.clear()
         val rad = Math.toRadians(rotation.toDouble())
         val c = cos(rad).toFloat()
         val s = sin(rad).toFloat()
-        val base = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
-        val v = FloatArray(4)
-        val out = FloatArray(4)
         for (i in 0 until 4) {
-            var u = (base[i * 2] - 0.5f) * sx
-            var t = (base[i * 2 + 1] - 0.5f) * sy
+            var u = (BASE[i * 2] - 0.5f) * sx
+            val t = (BASE[i * 2 + 1] - 0.5f) * sy
             if (mirror) u = -u
             // Otočení po směru hodin v souřadnicích obrazu (osa t míří nahoru).
-            val ru = u * c + t * s
-            val rt = -u * s + t * c
-            v[0] = ru + 0.5f
-            v[1] = rt + 0.5f
-            v[2] = 0f
-            v[3] = 1f
-            android.opengl.Matrix.multiplyMV(out, 0, texMatrix, 0, v, 0)
-            texCoords.put(out[0])
-            texCoords.put(out[1])
+            vIn[0] = u * c + t * s + 0.5f
+            vIn[1] = -u * s + t * c + 0.5f
+            vIn[2] = 0f
+            vIn[3] = 1f
+            android.opengl.Matrix.multiplyMV(vOut, 0, texMatrix, 0, vIn, 0)
+            texCoords.put(vOut[0])
+            texCoords.put(vOut[1])
         }
         texCoords.position(0)
         GLES20.glUseProgram(program)
@@ -224,21 +285,38 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
         if (display === EGL14.EGL_NO_DISPLAY) throw RuntimeException("EGL display")
         val version = IntArray(2)
         if (!EGL14.eglInitialize(display, version, 0, version, 1)) throw RuntimeException("eglInitialize")
-        val attribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL_RECORDABLE_ANDROID, 1,
-            EGL14.EGL_NONE,
+        // RGBA + „recordable“ (pro kodér); starší čipy někdy chtějí bez alfy, úplně staré bez recordable.
+        val tries = listOf(
+            intArrayOf(EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL_RECORDABLE_ANDROID, 1, EGL14.EGL_NONE),
+            intArrayOf(EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL_RECORDABLE_ANDROID, 1, EGL14.EGL_NONE),
+            intArrayOf(EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_NONE),
         )
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val num = IntArray(1)
-        if (!EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, num, 0) || num[0] == 0) throw RuntimeException("eglChooseConfig")
-        val config = configs[0]!!
-        context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
-        if (context === EGL14.EGL_NO_CONTEXT) throw RuntimeException("eglCreateContext")
-        eglSurface = EGL14.eglCreateWindowSurface(display, config, output, intArrayOf(EGL14.EGL_NONE), 0)
-        if (eglSurface === EGL14.EGL_NO_SURFACE) throw RuntimeException("eglCreateWindowSurface")
-        if (!EGL14.eglMakeCurrent(display, eglSurface, eglSurface, context)) throw RuntimeException("eglMakeCurrent")
+        var lastError = "eglChooseConfig"
+        for (attribs in tries) {
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val num = IntArray(1)
+            if (!EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, num, 0) || num[0] == 0) continue
+            val cfg = configs[0] ?: continue
+            val ctx = EGL14.eglCreateContext(display, cfg, EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+            if (ctx === EGL14.EGL_NO_CONTEXT) { lastError = "eglCreateContext"; continue }
+            val surf = EGL14.eglCreateWindowSurface(display, cfg, output, intArrayOf(EGL14.EGL_NONE), 0)
+            if (surf === EGL14.EGL_NO_SURFACE) {
+                lastError = "eglCreateWindowSurface 0x" + Integer.toHexString(EGL14.eglGetError())
+                EGL14.eglDestroyContext(display, ctx)
+                continue
+            }
+            if (!EGL14.eglMakeCurrent(display, surf, surf, ctx)) {
+                lastError = "eglMakeCurrent"
+                EGL14.eglDestroySurface(display, surf)
+                EGL14.eglDestroyContext(display, ctx)
+                continue
+            }
+            config = cfg
+            context = ctx
+            eglSurface = surf
+            return
+        }
+        throw RuntimeException(lastError)
     }
 
     private fun initGl() {
@@ -293,6 +371,7 @@ class GlCompositor(private val output: Surface, private val width: Int, private 
 
     companion object {
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private val BASE = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
         private const val VERTEX = """
             attribute vec2 aPos;
             attribute vec2 aTex;

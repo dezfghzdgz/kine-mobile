@@ -11,26 +11,33 @@ HttpURLConnection). iPhone zatím ne - viz dole.
 
 ## Jak to funguje
 
-- **Obrazovka**: `MediaProjection` -> `VirtualDisplay` kreslí do textury OpenGL.
-- **Kamera** (přední / zadní, `Camera2`): druhá textura; `GlCompositor` ji
-  skládá do rohu obrazu (velikost, roh, kruh / obdélník, zrcadlo, otočení) a
-  výsledek kreslí do vstupního povrchu kodéru H.264 (`VideoEncoder`).
+- **Obrazovka**: `MediaProjection` -> `VirtualDisplay`. Bez kamery kreslí rovnou do
+  vstupního povrchu kodéru H.264 (`VideoEncoder`) - žádné OpenGL, nejmíň práce.
+- **Kamera** (přední / zadní, `Camera2`): jen když je zapnutá - `GlCompositor`
+  (OpenGL ES 2) složí obrazovku a kameru (velikost, roh, kruh / obdélník, zrcadlo,
+  otočení) do kodéru. Když OpenGL na telefonu nejde, nahrává se bez kamery.
+- **Kodér** (`Device.videoPlans`): rozměr, snímky a datový tok podle toho, co kodér
+  opravdu umí (meze, zarovnání 16 px, výkon), hardwarový napřed; strop snímků
+  (displej 120 Hz nekóduje 120 snímků), opakování snímku při klidu, bez B-snímků.
 - **Zvuk**: zvuk hry přes `AudioPlaybackCapture` (co telefon hraje - hra to
   může zakázat, pak je ticho) + mikrofon, smíchané do jedné stopy AAC
-  (`AudioCapture`, `AudioEncoder`).
+  (`AudioCapture`, `AudioEncoder`); 48 kHz, starší mikrofony 44,1 kHz.
 - **Zásobník**: kodéry sypou do `SegmentWriter`, který každé 4 s (na klíčovém
   snímku) vymění soubor MP4; starší než délka klipu + rezerva se mažou.
 - **Klip**: `ClipMaker` slepí hotové kousky bez překódování (MediaExtractor ->
-  MediaMuxer), usekne začátek na klíčovém snímku a uloží do Galerie
-  (MediaStore, Movies/Kine). Knihovna appky (`Library`) si pamatuje odkaz,
-  délku a stav nahrání.
+  MediaMuxer, časy přepočtené na společné hodiny), usekne začátek na klíčovém
+  snímku a uloží do Galerie (MediaStore, Movies/Kine). Knihovna appky (`Library`)
+  si pamatuje odkaz, délku a stav nahrání.
+- **Otočení**: po otočení telefonu (hra na šířku) se kodér přenastaví na nový
+  rozměr (`VirtualDisplay.resize`), klip se lepí jen z kousků se stejným rozměrem.
 - **Kine**: přihlášení přes web (`/connect?app=mobile` -> `kine://link`,
   jednorázový token -> vlastní relace Supabase), nahrání jako z PC (lístek
   `/api/videos/create-upload-url`, tus do Cloudflare Stream, `/api/videos/confirm`),
   hlavička `X-Kine-App: android/<verze>` (web ji zná, `ANDROID_MIN_VERSION`
   ve Vercelu může starou verzi odmítnout).
-- **Služby**: `CaptureService` (popředí: mediaProjection | camera | microphone),
-  `UploadService` (popředí: dataSync). Bublina = okno přes jiné aplikace.
+- **Služby**: `CaptureService` (popředí: mediaProjection | camera | microphone;
+  veškerá těžká práce na vlákně `kine-pipe`), `UploadService` (popředí: dataSync).
+  Bublina = okno přes jiné aplikace (`Bubble`).
 
 ## Sestavení
 
@@ -60,37 +67,42 @@ Android SDK 35).
 1. Na telefonu otevři playkine.com/download (záložka Android) a stáhni
    `Kine-Clipper.apk` - nebo `app-debug.apk` z běhu Actions (Artifacts). Nainstaluj
    (povolit „instalovat neznámé aplikace“ pro prohlížeč / správce souborů).
-2. Otevři Kine Clipper -> Přihlásit přes Kine (prohlížeč, jedno klepnutí).
-3. Zapni kameru (přední), bublinu, Spustit -> povolit nahrávání obrazovky.
-   Android 14+: v okně systému zvol **Jedna aplikace** (hra) - bublina ani
-   oznámení pak v klipu nejsou vůbec; kameru skládá appka sama, ta zůstává.
-4. Přepni do hry, hraj, klepni na bublinu -> klip je v Galerii (Movies/Kine)
-   a v appce; Nahrát -> na Kine.
-5. Když je kamera na boku: Otočení kamery (0 / 90 / 180 / 270).
+2. Záložka **Nahrávání** -> **Spustit** -> povolit mikrofon / oznámení, „Zobrazení
+   přes jiné aplikace“ (bublina) a nahrávání obrazovky. Android 14+: v okně systému
+   zvol **Jedna aplikace** -> hra - bublina ani oznámení pak v klipu nejsou vůbec.
+3. Bublina se ukáže hned (oranžově bliká, dokud se nahrávání nerozjede, pak je
+   tyrkysová). Přepni do hry, klepni na bublinu -> zabliká zeleně = klip je
+   v Galerii (Movies/Kine) a v záložce **Klipy** (přehrát, nahrát na Kine,
+   sdílet, smazat).
+4. Když něco nejde, appka to napíše v kartě stavu (a tlačítko, které to spraví);
+   **Poslat deník** (Nastavení -> Appka) pošle, co se dělo.
 
-### Tlačítko, které v klipu není vidět (0.2.0)
+### Bublina (0.3.0)
 
-- **Nenápadná bublina** (výchozí): malá tečka, po 1,5 s klidu zprůhlední na čtvrtinu
-  a po dotyku se zase rozsvítí - v klipu je sotva vidět, prst ji trefí (plocha 56 dp).
-  „Plné tlačítko“ je v nastavení.
-- **Zatřesení = klip** (nastavení, výchozí vypnuto): dvě rázná trhnutí telefonem
-  během 0,7 s uloží klip; na obrazovce není nic, v klipu není nic. Akcelerometr
-  běží jen při snímání.
-- **Jen hra** (Android 14+): systém nahrává jen jednu aplikaci, překryvy jiných
-  appek (bublina, oznámení) v záznamu nejsou. Starší Android umí jen celou
-  obrazovku - tam pomůže nenápadná bublina nebo zatřesení.
+- **Tlačítko** (výchozí): kulaté 52 dp, dobře vidět. Tažení = posun, po puštění
+  přiskočí k okraji (pozice se pamatuje, i po otočení), podržení = otevřít appku.
+  Barvy: oranžová = spouští se / ukládá, tyrkysová = připraveno, zelená = uloženo,
+  červená = nepovedlo se.
+- **Proužek u okraje**: tenká čárka u okraje obrazovky (plocha na dotyk je větší,
+  ale průhledná) - v klipu skoro není vidět.
+- **Zatřesení = klip** (výchozí vypnuto): dvě rázná trhnutí během 0,7 s.
+- **Jedna aplikace** (Android 14+): překryvy (bublina, oznámení) v záznamu nejsou.
 
-### Nenáročnost (0.2.0)
+### Starší telefony (0.3.0)
 
-Výchozí 720p / 30 fps / 5 Mb/s (1080p a 60 fps jdou zapnout), kamera nejvýš 480p
-(v obraze je malá), obraz se skládá jen když se něco změní (nejvýš fps za sekundu)
-a kodéry jsou hardwarové. Klip = překopírování posledních sekund (bez překódování).
+- Třída telefonu (`Device.tier`): málo paměti (≤ 3 GB), Android Go nebo ≤ 4 jádra
+  = „starší“ -> kvalita **Auto** dá 480p / 30 fps / ~2 Mb/s, kamera 360p / 24 fps,
+  zvuk 96 kb/s. Ostatní 720p / 30 fps / ~4 Mb/s. Ručně 480p / 720p / 1080p, 30 / 60 fps.
+- Hlavní vlákno nikdy nečeká (start, otočení, stop, deník na disk - vše jinde);
+  start i stop hlídá časovač, appka nikdy nezůstane viset na „Spouští se…“.
+- Spadlý kodér (systém si ho vezme pro jinou appku) se obnoví; horký telefon
+  vypne kameru a ubere datový tok, po vychladnutí zpátky.
+- Seznam klipů recykluje řádky a náhledy načítá na pozadí (max. ~6 MB v paměti).
 
 ## Co zatím chybí / omezení
 
-- Otočení telefonu během nahrávání: obraz se nahrává v orientaci, ve které
-  se spustilo (otočený obsah se do něj zmenší). Spusť nahrávání až v hře
-  (na šířku), nebo zastav a spusť znovu.
+- Klip hned po otočení telefonu obsahuje jen část od otočení (kousky s jiným
+  rozměrem se nelepí - bez překódování to nejde).
 - Úpravy klipu (zkrácení, text, překryvy) - zatím jen na PC / webu.
 - iPhone: nahrávání jiné appky jde jen přes systémové „Nahrávání obrazovky“
   s rozšířením (ReplayKit), bez kamery přes hru a bez bubliny - jiný projekt.

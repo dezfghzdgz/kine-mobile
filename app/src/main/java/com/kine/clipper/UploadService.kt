@@ -17,12 +17,22 @@ import java.io.FileInputStream
 class UploadService : Service() {
     companion object {
         const val ACTION_KICK = "com.kine.clipper.UPLOAD"
+        /** Kus pro tus (Cloudflare chce aspoň 5 MiB, násobek 256 KiB); telefony s málo pamětí 5 MiB. */
         private const val CHUNK = 8 * 1024 * 1024
+        private const val CHUNK_LOW = 5 * 1024 * 1024
         @Volatile var active = false
             private set
 
-        fun kick(context: Context) {
+        /**
+         * Spustit frontu. Android 12+ nedovolí službu na popředí spustit z pozadí (např. Stop
+         * z oznámení během hry) - pak klipy zůstanou ve frontě a pošlou se po otevření appky.
+         */
+        fun kick(context: Context): Boolean = try {
             context.startForegroundService(Intent(context, UploadService::class.java).setAction(ACTION_KICK))
+            true
+        } catch (e: Exception) {
+            Log.w("nahrávání: teď nejde spustit (${e.message}) - zkusí se po otevření appky")
+            false
         }
     }
 
@@ -85,11 +95,12 @@ class UploadService : Service() {
                     val channel = input.channel
                     if (target.mode == "tus") {
                         var offset = 0L
-                        val buffer = ByteArray(CHUNK)
+                        val chunk = if (Device.isLowRam(this)) CHUNK_LOW else CHUNK
+                        val buffer = ByteArray(chunk)
                         var failures = 0
                         while (offset < size) {
                             if (stopRequested) throw IllegalStateException("stopped")
-                            val length = minOf(CHUNK.toLong(), size - offset).toInt()
+                            val length = minOf(chunk.toLong(), size - offset).toInt()
                             channel.position(offset)
                             var read = 0
                             while (read < length) {
@@ -140,7 +151,7 @@ class UploadService : Service() {
                     Thread.sleep(5000)
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e("nahrávání ${clip.title}", e)
             val msg = e.message ?: "error"
             lib.update(clip.id) { it.uploadState = "error"; it.error = msg }

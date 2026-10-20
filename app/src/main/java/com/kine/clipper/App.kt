@@ -6,7 +6,13 @@ import android.app.Application
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        Notifications.createChannels(this)
         Log.init(this)
+        // Pád kdekoli se zapíše do deníku (Poslat deník), pak ho Android ukončí jako obvykle.
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try { Log.crash(thread.name, error) } catch (_: Throwable) { }
+            previous?.uncaughtException(thread, error)
+        }
+        Notifications.createChannels(this)
     }
 }

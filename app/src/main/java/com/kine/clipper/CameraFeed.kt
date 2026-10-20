@@ -16,20 +16,23 @@ import android.util.Size
 import android.view.Surface
 
 /**
- * Kamera do klipu (Camera2): přední nebo zadní, náhled 16:9 do 480p rovnou do
- * SurfaceTexture kompozitoru. Když kameru drží jiná appka nebo se odpojí,
- * zkouší se znovu každých 10 s; klip se mezitím nahrává bez ní.
+ * Kamera do klipu (Camera2): přední nebo zadní, malý náhled (nejvýš [maxHeight] px,
+ * starší telefony 360p) rovnou do SurfaceTexture kompozitoru, snímky z rozsahu, který
+ * kamera opravdu umí (nejvýš [maxFps]). Když kameru drží jiná appka nebo se odpojí,
+ * zkouší se znovu každých 10 s; klip se mezitím nahrává bez ní. [suspend] / [resume]
+ * = pauza (horký telefon).
  */
-class CameraFeed(context: Context, private val front: Boolean, private val handler: Handler, private val onState: (String) -> Unit) {
+class CameraFeed(context: Context, private val front: Boolean, private val handler: Handler, private val maxHeight: Int, private val maxFps: Int, private val onState: (String) -> Unit) {
     private val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var surface: Surface? = null
     @Volatile private var closed = false
+    @Volatile private var suspended = false
     private var retry: Runnable? = null
 
-    /** Rozměr náhledu a orientace čipu - kompozitor podle toho ořízne a otočí. */
-    data class Info(val id: String, val size: Size, val sensorOrientation: Int, val front: Boolean)
+    /** Rozměr náhledu, orientace čipu a rozsah snímků - kompozitor podle toho ořízne a otočí. */
+    data class Info(val id: String, val size: Size, val sensorOrientation: Int, val front: Boolean, val fps: Range<Int>?)
 
     val info: Info? = pick()
 
@@ -43,7 +46,8 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
                 val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
                 val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: continue
                 val size = chooseSize(sizes.toList())
-                return Info(id, size, c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0, front)
+                val fps = chooseFps(c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES))
+                return Info(id, size, c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0, front, fps)
             }
             null
         } catch (e: Exception) {
@@ -52,20 +56,26 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
         }
     }
 
-    /**
-     * Nejvýš 480p, nejradši 16:9, jinak největší, co se vejde. Kamera je v obraze malá
-     * (nejvýš polovina šířky klipu v 720p), víc pixelů by jen hřálo telefon.
-     */
+    /** Nejvýš [maxHeight] px, nejradši 16:9, jinak největší, co se vejde - kamera je v obraze malá. */
     private fun chooseSize(sizes: List<Size>): Size {
-        val fitting = sizes.filter { it.height <= 480 && it.width <= 864 }
+        val fitting = sizes.filter { it.height <= maxHeight && it.width <= maxHeight * 16 / 9 + 16 }
         val wide = fitting.filter { kotlin.math.abs(it.width.toFloat() / it.height - 16f / 9f) < 0.05f }
         val pool = if (wide.isNotEmpty()) wide else if (fitting.isNotEmpty()) fitting else sizes
-        return pool.maxByOrNull { it.width * it.height } ?: Size(640, 480)
+        return if (pool === sizes) sizes.minByOrNull { it.width * it.height } ?: Size(640, 480) else pool.maxByOrNull { it.width * it.height } ?: Size(640, 480)
+    }
+
+    /** Rozsah snímků, který kamera umí: nejvyšší strop do [maxFps], s co nejnižším spodkem (tma = delší expozice). */
+    private fun chooseFps(ranges: Array<Range<Int>>?): Range<Int>? {
+        val ok = ranges?.filter { it.upper <= maxFps } ?: return null
+        if (ok.isEmpty()) return null
+        val top = ok.maxOf { it.upper }
+        return ok.filter { it.upper == top }.minByOrNull { it.lower }
     }
 
     @SuppressLint("MissingPermission")
     fun open(target: Surface) {
         surface = target
+        if (closed || suspended) return
         val i = info
         if (i == null) {
             onState("missing")
@@ -75,12 +85,12 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
         try {
             manager.openCamera(i.id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
-                    if (closed) {
+                    if (closed || suspended) {
                         camera.close()
                         return
                     }
                     device = camera
-                    startSession(camera, target)
+                    startSession(camera, target, i)
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
@@ -104,11 +114,11 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
         }
     }
 
-    private fun startSession(camera: CameraDevice, target: Surface) {
+    private fun startSession(camera: CameraDevice, target: Surface, i: Info) {
         try {
             val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(target)
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(24, 30))
+                if (i.fps != null) set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, i.fps)
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             }
             val config = SessionConfiguration(
@@ -117,7 +127,7 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
                 { r -> handler.post(r) },
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(s: CameraCaptureSession) {
-                        if (closed) {
+                        if (closed || suspended) {
                             s.close()
                             return
                         }
@@ -147,10 +157,10 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
     }
 
     private fun scheduleRetry() {
-        if (closed) return
+        if (closed || suspended) return
         retry?.let { handler.removeCallbacks(it) }
         val r = Runnable {
-            if (closed) return@Runnable
+            if (closed || suspended) return@Runnable
             val t = surface ?: return@Runnable
             closeDevice()
             open(t)
@@ -160,18 +170,25 @@ class CameraFeed(context: Context, private val front: Boolean, private val handl
     }
 
     private fun closeDevice() {
-        try {
-            session?.close()
-        } catch (_: Exception) {
-            // nevadí
-        }
+        try { session?.close() } catch (_: Exception) { }
         session = null
-        try {
-            device?.close()
-        } catch (_: Exception) {
-            // nevadí
-        }
+        try { device?.close() } catch (_: Exception) { }
         device = null
+    }
+
+    /** Pauza (horký telefon): kamera se zavře, klip jede dál bez ní. */
+    fun suspend() {
+        if (closed || suspended) return
+        suspended = true
+        retry?.let { handler.removeCallbacks(it) }
+        closeDevice()
+        onState("paused")
+    }
+
+    fun resume() {
+        if (closed || !suspended) return
+        suspended = false
+        surface?.let { open(it) }
     }
 
     fun close() {
