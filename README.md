@@ -96,8 +96,25 @@ Android SDK 35).
 - Hlavní vlákno nikdy nečeká (start, otočení, stop, deník na disk - vše jinde);
   start i stop hlídá časovač, appka nikdy nezůstane viset na „Spouští se…“.
 - Spadlý kodér (systém si ho vezme pro jinou appku) se obnoví; horký telefon
-  vypne kameru a ubere datový tok, po vychladnutí zpátky.
+  šetří po stupních (viz Méně tepla), po vychladnutí zpátky.
 - Seznam klipů recykluje řádky a náhledy načítá na pozadí (max. ~6 MB v paměti).
+
+### Méně tepla (0.4.0)
+
+- **Starší telefon** (`Device.older`: Android 11 a starší, nebo bez výkonnostní třídy
+  médií a s pamětí „4 GB“ a míň) dostane v Auto **540p** místo 720p; telefon s 8 GB,
+  ale starý (Android 11), už nedostane nastavení „nového“.
+- **Šetrný režim** (Nastavení -> Klip, na slabém telefonu zapnutý od začátku):
+  480p / 24 fps / ~1,2 Mb/s, kamera 15 fps, zvuk 96 kb/s.
+- **Hlídání teploty**: stav od systému (Android 10+) i teplota baterie každých 20 s
+  (hlásí ji každý telefon). Teplý (od 40 °C / MODERATE) = datový tok 75 %, kamera
+  20 fps; horký (od 43 °C / SEVERE) = o stupeň menší obraz (720 -> 540), 24 fps,
+  kamera pauza; velmi horký (od 46 °C / CRITICAL) = ještě menší, 20 fps, tok 60 %.
+  Datový tok a kamera se vrátí po minutě klidu a o 1,5 °C níž, po stupních (žádné
+  cukání); menší obraz zůstane do konce snímání - každé přenastavení kodéru začíná
+  zásobník znovu, tak jen při zahřátí. Čistý výpočet `Heat` / `SizeMath` jde ověřit
+  mimo telefon.
+- Kodér jede tempem snímků (`KEY_OPERATING_RATE`), ne naplno.
 
 ## Co zatím chybí / omezení
 

@@ -25,23 +25,32 @@ object Device {
     private const val AVC = MediaFormat.MIMETYPE_VIDEO_AVC
 
     @Volatile private var cachedTier: Tier? = null
+    @Volatile private var cachedOlder: Boolean? = null
+
+    private fun ramGb(context: Context): Double = try {
+        val mi = ActivityManager.MemoryInfo()
+        context.getSystemService(ActivityManager::class.java)?.getMemoryInfo(mi)
+        mi.totalMem / 1_073_741_824.0
+    } catch (_: Exception) {
+        0.0
+    }
 
     /**
      * Třída telefonu: LOW = málo paměti (< 3,5 GB, tj. „3 GB“ a míň), Android Go nebo
-     * nejvýš 4 jádra; HIGH = výkonnostní třída médií Androidu 12+ nebo 7+ GB a 8 jader.
+     * nejvýš 4 jádra; HIGH = výkonnostní třída médií Androidu 12+ nebo 7+ GB a 8 jader
+     * u telefonu, který není starší (viz [older] - pětiletý telefon s 8 GB dřív dostal
+     * nastavení jako nový a hřál).
      */
     fun tier(context: Context): Tier {
         cachedTier?.let { return it }
         val t = try {
             val am = context.getSystemService(ActivityManager::class.java)
-            val mi = ActivityManager.MemoryInfo()
-            am?.getMemoryInfo(mi)
-            val ramGb = mi.totalMem / 1_073_741_824.0
+            val ram = ramGb(context)
             val cores = Runtime.getRuntime().availableProcessors()
             val perf = if (Build.VERSION.SDK_INT >= 31) Build.VERSION.MEDIA_PERFORMANCE_CLASS else 0
             when {
-                am?.isLowRamDevice == true || (ramGb > 0.1 && ramGb < 3.5) || cores <= 4 -> Tier.LOW
-                perf >= 31 || (ramGb >= 7.0 && cores >= 8) -> Tier.HIGH
+                am?.isLowRamDevice == true || (ram > 0.1 && ram < 3.5) || cores <= 4 -> Tier.LOW
+                perf >= 31 || (ram >= 7.0 && cores >= 8 && !older(context)) -> Tier.HIGH
                 else -> Tier.MID
             }
         } catch (_: Exception) {
@@ -49,6 +58,22 @@ object Device {
         }
         cachedTier = t
         return t
+    }
+
+    /**
+     * Starší telefon (typicky 4-6 let): Android 11 a starší (telefony, které nedostaly
+     * Android 12), nebo bez výkonnostní třídy médií a s pamětí „4 GB“ a míň. V Auto
+     * dostane 540p místo 720p - méně práce pro kodér i skládání obrazu, telefon tolik nehřeje.
+     */
+    fun older(context: Context): Boolean {
+        cachedOlder?.let { return it }
+        val o = try {
+            SizeMath.olderDevice(Build.VERSION.SDK_INT, if (Build.VERSION.SDK_INT >= 31) Build.VERSION.MEDIA_PERFORMANCE_CLASS else 0, ramGb(context))
+        } catch (_: Exception) {
+            false
+        }
+        cachedOlder = o
+        return o
     }
 
     fun isLowRam(context: Context): Boolean = try {
@@ -82,7 +107,7 @@ object Device {
      * stran jako obsah obrazovky, jen co kodér umí. Na konci vždycky výchozí kodér
      * v 480p / 30 fps (poslední záchrana).
      */
-    fun videoPlans(contentW: Int, contentH: Int, short: Int, fps: Int, tier: Tier): List<VideoPlan> {
+    fun videoPlans(contentW: Int, contentH: Int, short: Int, fps: Int, tier: Tier, eco: Boolean = false): List<VideoPlan> {
         val out = ArrayList<VideoPlan>()
         val steps = SizeMath.steps(short)
         for (info in encoders()) {
@@ -95,7 +120,8 @@ object Device {
                 val ok = try { vc.isSizeSupported(w, h) } catch (_: Exception) { false }
                 if (!ok) continue
                 val f = pickFps(vc, w, h, fps) ?: continue
-                val br = try { vc.bitrateRange.clamp(SizeMath.bitrate(w, h, f, tier == Tier.LOW)) } catch (_: Exception) { SizeMath.bitrate(w, h, f, tier == Tier.LOW) }
+                val want = SizeMath.bitrate(w, h, f, tier == Tier.LOW, eco)
+                val br = try { vc.bitrateRange.clamp(want) } catch (_: Exception) { want }
                 out.add(VideoPlan(info.name, w, h, f, br, info.isHardwareAccelerated))
                 // Z každého kodéru nejlepší rozměr a jeden menší (kdyby ten větší při spuštění neprošel).
                 if (++added >= 2) break
@@ -103,7 +129,8 @@ object Device {
             if (out.size >= 6) break
         }
         val (fw, fh) = SizeMath.fit(contentW, contentH, min(short, 480), 16)
-        out.add(VideoPlan(null, fw, fh, 30, SizeMath.bitrate(fw, fh, 30, true), false))
+        val ff = min(30, fps)
+        out.add(VideoPlan(null, fw, fh, ff, SizeMath.bitrate(fw, fh, ff, true, eco), false))
         // Hardwarové nejdřív (i menší rozměr na hardwaru je lepší než větší v softwaru).
         return out.sortedWith(compareBy<VideoPlan> { if (it.hardware) 0 else 1 }.thenByDescending { min(it.width, it.height) }).distinct()
     }
@@ -149,14 +176,100 @@ object SizeMath {
 
     /**
      * Datový tok: ~0,12 bitu na pixel a snímek (hry se hodně hýbou), 60 fps jen ~1,5×
-     * (sousední snímky jsou si podobné); 1,5-12 Mb/s.
+     * (sousední snímky jsou si podobné); 1,5-12 Mb/s. Šetrný režim ([eco]) ~0,10 a od
+     * 1,2 Mb/s - kodér má méně práce, telefon tolik nehřeje.
      */
-    fun bitrate(w: Int, h: Int, fps: Int, low: Boolean): Int {
-        val bpp = if (low) 0.13 else 0.12
+    fun bitrate(w: Int, h: Int, fps: Int, low: Boolean, eco: Boolean = false): Int {
+        val bpp = if (eco) 0.10 else if (low) 0.13 else 0.12
         val f = if (fps > 40) fps * 0.75 else fps.toDouble()
-        return (w.toDouble() * h * f * bpp).roundToInt().coerceIn(1_500_000, 12_000_000)
+        return (w.toDouble() * h * f * bpp).roundToInt().coerceIn(if (eco) 1_200_000 else 1_500_000, 12_000_000)
+    }
+
+    /** Starší telefon: Android 11 a starší, nebo bez výkonnostní třídy médií a s pamětí „4 GB“ a míň. */
+    fun olderDevice(sdk: Int, mediaPerformanceClass: Int, ramGb: Double): Boolean =
+        // „6 GB“ telefon hlásí ~5,4-5,8 GiB - hranice 5 GB, ať nový 6GB telefon není „starší“.
+        sdk <= 30 || (mediaPerformanceClass == 0 && ramGb > 0.1 && ramGb < 5.0)
+
+    /** Kratší strana v Auto: slabý telefon 480p, starší 540p, jinak 720p. */
+    fun autoShort(low: Boolean, older: Boolean): Int = if (low) 480 else if (older) 540 else 720
+
+    /**
+     * Horký telefon: kratší strana podle stupně (0 normální, 1 teplý, 2 horký, 3 velmi
+     * horký). Teplý jen ubere datový tok (rozměr stejný), horký o stupeň menší obraz,
+     * velmi horký o dva - nejméně 360p.
+     */
+    fun coolShort(short: Int, level: Int): Int {
+        if (level < 2) return short
+        val ladder = listOf(1080, 720, 540, 480, 360)
+        val idx = ladder.indexOfFirst { it <= short }.let { if (it < 0) ladder.size - 1 else it }
+        return ladder[minOf(ladder.size - 1, idx + (level - 1))].coerceAtMost(short)
     }
 
     /** Na šířku? (pro otočení telefonu během nahrávání) */
     fun landscape(w: Int, h: Int): Boolean = w > h
+
+    /** Snímky za sekundu při horkém telefonu: horký nejvýš 24, velmi horký 20. */
+    fun coolFps(fps: Int, level: Int): Int = when {
+        level >= 3 -> minOf(fps, 20)
+        level >= 2 -> minOf(fps, 24)
+        else -> fps
+    }
+
+    /** Kolik datového toku zůstane při horkém telefonu (teplý 75 %, velmi horký 60 %). */
+    fun coolBitrateFactor(level: Int): Double = when {
+        level >= 3 -> 0.6
+        level >= 1 -> 0.75
+        else -> 1.0
+    }
+}
+
+/**
+ * Jak horký je telefon (čistý výpočet - jde ověřit mimo telefon). Bere stav teploty od
+ * systému (PowerManager, Android 10+, ne každý telefon ho hlásí) a teplotu baterie
+ * (hlásí každý telefon) - platí vyšší z obou.
+ */
+object Heat {
+    /** Stav systému (PowerManager.THERMAL_STATUS_*) a baterie (°C, null = nevíme) -> stupeň 0-3. */
+    fun level(thermalStatus: Int, batteryC: Float?): Int {
+        val fromSystem = when {
+            thermalStatus >= 4 -> 3 // CRITICAL a víc
+            thermalStatus >= 3 -> 2 // SEVERE
+            thermalStatus >= 2 -> 1 // MODERATE
+            else -> 0
+        }
+        val fromBattery = when {
+            batteryC == null -> 0
+            batteryC >= 46f -> 3
+            batteryC >= 43f -> 2
+            batteryC >= 40f -> 1
+            else -> 0
+        }
+        return maxOf(fromSystem, fromBattery)
+    }
+
+    /** Teplota baterie, pod kterou se smí stupeň snížit (o 1,5 °C níž než hranice - žádné cukání). */
+    fun coolEnough(level: Int, batteryC: Float?): Boolean {
+        if (batteryC == null) return true
+        val limit = when (level) {
+            3 -> 46f
+            2 -> 43f
+            1 -> 40f
+            else -> return true
+        }
+        return batteryC < limit - 1.5f
+    }
+
+    /** Jak dlouho musí být telefon chladnější, než se kvalita vrátí o stupeň výš. */
+    const val COOL_DOWN_MS = 60_000L
+
+    /**
+     * Další stupeň: zahřátí platí hned, ochlazení až po [COOL_DOWN_MS] klidu (a jen o jeden
+     * stupeň). [lowerSince] = od kdy je naměřeno méně (0 = není). Vrací (stupeň, lowerSince).
+     */
+    fun next(current: Int, measured: Int, batteryC: Float?, lowerSince: Long, now: Long): Pair<Int, Long> {
+        if (measured >= current) return (if (measured > current) measured else current) to 0L
+        if (!coolEnough(current, batteryC)) return current to 0L
+        val since = if (lowerSince == 0L) now else lowerSince
+        return if (now - since >= COOL_DOWN_MS) (current - 1) to 0L else current to since
+    }
 }

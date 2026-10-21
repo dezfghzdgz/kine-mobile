@@ -44,7 +44,7 @@
     <string name="warn_game_audio_failed">Game sound unavailable</string>
     <string name="warn_mic_failed">Microphone unavailable</string>
     <string name="warn_camera_failed">Camera in clips isn\'t possible on this phone</string>
-    <string name="warn_hot">Phone is hot - camera paused, lower quality</string>
+    <string name="warn_hot">Phone is warm - lower quality so it heats less</string>
     <string name="warn_background_start">Sound and camera need Kine Clipper open at Start - this time only the screen</string>
     <string name="warn_overlay">Bubble needs “Display over other apps”</string>
     <string name="warn_overlay_lowram">This phone doesn\'t allow the bubble - use Clip in the notification or Shake = clip</string>
@@ -100,7 +100,7 @@
     <string name="clip_seconds_value">%1$d s</string>
     <string name="quality">Quality</string>
     <string name="quality_auto">Auto</string>
-    <string name="quality_auto_hint">Auto = %1$s on this phone. Older phones get a lighter 480p so games don\'t lag. 1080p = sharper, heavier.</string>
+    <string name="quality_auto_hint">Auto = %1$s on this phone. Older phones get a lighter 480p or 540p so games don\'t lag and the phone stays cooler. 1080p = sharper, heavier.</string>
     <string name="frame_rate">FPS</string>
     <string name="bubble_show">Show bubble</string>
     <string name="bubble_hint">Floating Clip button over games. Drag it anywhere - it snaps to the edge. Long press opens the app.</string>
@@ -148,4 +148,6 @@
     <string name="overlay_title">Bubble over games</string>
     <string name="overlay_text">Allow “Display over other apps” for Kine Clipper - the Clip bubble then floats over your game. Without it, clip from the notification.</string>
     <string name="overlay_skip">Without bubble</string>
+    <string name="eco_mode">Cool mode (less heat)</string>
+    <string name="eco_mode_hint">480p · 24 fps · lower bitrate, camera 15 fps. For older phones that get hot. When the phone heats up, Kine lowers the quality on its own anyway.</string>
 </resources>

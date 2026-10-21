@@ -19,8 +19,8 @@ class Settings(context: Context) {
         set(v) = p.edit().putInt("clipSeconds", v.coerceIn(10, 120)).apply()
 
     /**
-     * Kvalita: "auto" (podle telefonu - starší 480p, ostatní 720p), "480", "720", "1080".
-     * Z 0.2.0 se ručně zapnuté 1080p převezme, jinak Auto.
+     * Kvalita: "auto" (podle telefonu - slabý 480p, starší 540p, ostatní 720p), "480",
+     * "720", "1080". Z 0.2.0 se ručně zapnuté 1080p převezme, jinak Auto.
      */
     var quality: String
         get() = p.getString("quality", null) ?: if (p.getInt("maxHeight", 0) >= 1080) "1080" else "auto"
@@ -30,16 +30,31 @@ class Settings(context: Context) {
         get() = p.getInt("fps", 30).coerceIn(15, 60)
         set(v) = p.edit().putInt("fps", v.coerceIn(15, 60)).apply()
 
-    /** Kratší strana obrazu v px pro tuhle kvalitu a telefon. */
-    fun shortSide(tier: Device.Tier): Int = when (quality) {
-        "480" -> 480
-        "720" -> 720
-        "1080" -> 1080
-        else -> if (tier == Device.Tier.LOW) 480 else 720
+    /**
+     * Šetrný režim (méně hřeje): 480p, 24 fps, nižší datový tok, kamera 15 fps. Výchozí
+     * zapnutý na slabém telefonu (dokud si ho člověk sám nepřepne).
+     */
+    fun ecoMode(tier: Device.Tier): Boolean = if (p.contains("ecoMode")) p.getBoolean("ecoMode", false) else tier == Device.Tier.LOW
+
+    fun setEcoMode(on: Boolean) = p.edit().putBoolean("ecoMode", on).apply()
+
+    /** Kratší strana obrazu v px pro tuhle kvalitu a telefon (šetrný režim nejvýš 480p). */
+    fun shortSide(tier: Device.Tier, older: Boolean, eco: Boolean): Int {
+        val q = when (quality) {
+            "480" -> 480
+            "720" -> 720
+            "1080" -> 1080
+            else -> SizeMath.autoShort(tier == Device.Tier.LOW, older)
+        }
+        return if (eco) minOf(q, 480) else q
     }
 
-    /** Snímky za sekundu: v Auto na starším telefonu vždy 30. */
-    fun targetFps(tier: Device.Tier): Int = if (quality == "auto" && tier == Device.Tier.LOW) 30 else fps
+    /** Snímky za sekundu: šetrný režim 24, v Auto na slabém telefonu 30, jinak podle volby. */
+    fun targetFps(tier: Device.Tier, eco: Boolean): Int = when {
+        eco -> minOf(24, fps)
+        quality == "auto" && tier == Device.Tier.LOW -> 30
+        else -> fps
+    }
 
     /** Kamera v klipu: "off" / "front" / "back". */
     var camera: String

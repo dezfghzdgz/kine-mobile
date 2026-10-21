@@ -735,11 +735,17 @@ class MainActivity : Activity() {
             renderStatus()
         }))
         val qualities = listOf("auto", "480", "720", "1080")
-        val autoP = if (tier == Device.Tier.LOW) "480p" else "720p"
+        // Šetrný režim má nejvýš 480p - nápověda k Auto ať neříká víc.
+        val autoP = "${if (settings.ecoMode(tier)) 480 else SizeMath.autoShort(tier == Device.Tier.LOW, Device.older(this))}p"
         clip.addView(ui.field(getString(R.string.quality), ui.segmented(listOf(getString(R.string.quality_auto), "480p", "720p", "1080p"), qualities.indexOf(settings.quality).coerceAtLeast(0)) { i ->
             settings.quality = qualities[i]
         }, getString(R.string.quality_auto_hint, autoP)))
         clip.addView(ui.field(getString(R.string.frame_rate), ui.segmented(listOf("30", "60"), if (settings.fps >= 60) 1 else 0) { i -> settings.fps = if (i == 1) 60 else 30 }))
+        // Šetrný režim: méně hřeje (starší telefony). Na horko appka reaguje sama i bez něj.
+        clip.addView(ui.switchRow(getString(R.string.eco_mode), null, settings.ecoMode(tier), getString(R.string.eco_mode_hint)) { on ->
+            settings.setEcoMode(on)
+            renderStatus()
+        })
         box.addView(clip)
 
         // Bublina

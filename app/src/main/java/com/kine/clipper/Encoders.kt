@@ -123,13 +123,21 @@ class VideoEncoder private constructor(
                     codec = c
                     var full = true
                     try {
-                        c.configure(format(p, true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                        c.configure(format(p, true, true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                     } catch (e: Exception) {
-                        // Některé kodéry nevezmou VBR / opakování snímku / strop snímků - zkusit základ.
-                        Log.w("kodér ${p.codec}: základní nastavení (${e.message})")
+                        // Některé kodéry nevezmou tempo kódování (operating rate) - zkusit bez něj,
+                        // ať nepřijdou o VBR, opakování snímku a strop snímků.
+                        Log.w("kodér ${p.codec}: bez operating rate (${e.message})")
                         c.reset()
-                        c.configure(format(p, false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                        full = false
+                        try {
+                            c.configure(format(p, true, false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                        } catch (e2: Exception) {
+                            // Některé kodéry nevezmou VBR / opakování snímku / strop snímků - zkusit základ.
+                            Log.w("kodér ${p.codec}: základní nastavení (${e2.message})")
+                            c.reset()
+                            c.configure(format(p, false, false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                            full = false
+                        }
                     }
                     val enc = VideoEncoder(c, p, sink, onFatal)
                     try {
@@ -149,7 +157,7 @@ class VideoEncoder private constructor(
             throw last ?: IllegalStateException("no H.264 encoder")
         }
 
-        private fun format(p: Device.VideoPlan, full: Boolean): MediaFormat = MediaFormat.createVideoFormat(AVC, p.width, p.height).apply {
+        private fun format(p: Device.VideoPlan, full: Boolean, rate: Boolean): MediaFormat = MediaFormat.createVideoFormat(AVC, p.width, p.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, p.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, p.fps)
@@ -161,6 +169,9 @@ class VideoEncoder private constructor(
                 setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
                 setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, p.fps.toFloat())
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
+                // Kodér má jet tempem snímků, ne naplno - některé telefony bez toho
+                // drží kodér na nejvyšším taktu (zbytečné teplo).
+                if (rate) setInteger(MediaFormat.KEY_OPERATING_RATE, p.fps)
             }
         }
     }

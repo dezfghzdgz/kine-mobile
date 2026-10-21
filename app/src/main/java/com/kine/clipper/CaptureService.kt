@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Point
@@ -17,6 +18,8 @@ import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.BatteryManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -43,7 +46,11 @@ import kotlin.math.min
  * místo „Spouští se…“ navždy. Bublina je vidět hned po povolení nahrávání. Bez kamery
  * jde obrazovka rovnou do kodéru (bez OpenGL). Po otočení telefonu (hra na šířku) se
  * kodér přenastaví na nový rozměr - klip není zmenšený v černém rámu. Spadlý kodér
- * se zkusí obnovit, horký telefon vypne kameru a ubere datový tok.
+ * se zkusí obnovit.
+ *
+ * Teplo (hlavně starší telefony): hlídá se stav teploty od systému i teplota baterie
+ * (každých 20 s). Teplý telefon -> nižší datový tok; horký -> menší obraz, 24 fps,
+ * kamera pauza; velmi horký -> ještě menší. Zpátky po minutě klidu, po stupních.
  */
 class CaptureService : Service() {
     companion object {
@@ -482,8 +489,25 @@ class CaptureService : Service() {
         private var crashRecoveries = 0
         private var lastRecoverAt = 0L
         private var lastRotation = -1
-        private var hot = false
+        /** Šetrný režim (nastavení): 480p, 24 fps, nižší datový tok. */
+        private var eco = false
+        /** Rozměr a snímky, které teď platí - při horkém telefonu menší než [shortSide] / [fps]. */
+        private var curShort = 720
+        private var curFps = 30
+        /** Jak horký je telefon: 0 normální, 1 teplý, 2 horký, 3 velmi horký (viz [Heat]). */
+        private var heatLevel = 0
+        private var thermalStatus = 0
+        private var batteryC: Float? = null
+        private var lowerSince = 0L
         private var thermal: PowerManager.OnThermalStatusChangedListener? = null
+        private val heatPoll = object : Runnable {
+            override fun run() {
+                if (stopped) return
+                readBattery()
+                evaluateHeat()
+                pipe.postDelayed(this, 20_000)
+            }
+        }
         private val dm: DisplayManager = getSystemService(DisplayManager::class.java)
 
         private val callback = object : MediaProjection.Callback() {
@@ -543,9 +567,13 @@ class CaptureService : Service() {
             try {
                 val ctx = this@CaptureService
                 tier = Device.tier(ctx)
-                shortSide = settings.shortSide(tier)
-                fps = settings.targetFps(tier)
-                Log.i("start: ${Device.describe(ctx)}; kvalita ${settings.quality} -> ${shortSide}p / $fps fps, kamera ${if (useCamera) settings.camera else "ne"}, zvuk ${if (useAudio) "hra ${settings.gameAudio} + mikrofon ${settings.microphone}" else "ne"}")
+                eco = settings.ecoMode(tier)
+                val older = Device.older(ctx)
+                shortSide = settings.shortSide(tier, older, eco)
+                fps = settings.targetFps(tier, eco)
+                curShort = shortSide
+                curFps = fps
+                Log.i("start: ${Device.describe(ctx)}${if (older) ", starší telefon" else ""}; kvalita ${settings.quality}${if (eco) " + šetrný režim" else ""} -> ${shortSide}p / $fps fps, kamera ${if (useCamera) settings.camera else "ne"}, zvuk ${if (useAudio) "hra ${settings.gameAudio} + mikrofon ${settings.microphone}" else "ne"}")
                 val display = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: throw IllegalStateException("no display")
                 val size = realSize(display)
                 screenW = size.x
@@ -582,7 +610,7 @@ class CaptureService : Service() {
                 var wr = SegmentWriter(dir, keepUs, a != null) { venc?.requestKeyFrame() }
                 if (a != null) {
                     try {
-                        aenc = AudioEncoder(a.rate, 2, if (tier == Device.Tier.LOW) 96_000 else 128_000, wr)
+                        aenc = AudioEncoder(a.rate, 2, if (tier == Device.Tier.LOW || eco) 96_000 else 128_000, wr)
                         audio = a
                     } catch (e: Exception) {
                         Log.e("kodér zvuku nejde", e)
@@ -594,7 +622,7 @@ class CaptureService : Service() {
                 writer = wr
 
                 // Obraz: kodér podle toho, co telefon zvládne.
-                val plans = Device.videoPlans(contentW, contentH, shortSide, fps, tier)
+                val plans = Device.videoPlans(contentW, contentH, curShort, curFps, tier, eco)
                 Log.i("možnosti kodéru: " + plans.joinToString { "${it.codec ?: "výchozí"} ${it.width}x${it.height}@${it.fps}" })
                 val v = VideoEncoder.open(plans, wr) { e -> pipe.post { recoverCrash(e) } }
                 venc = v
@@ -635,8 +663,8 @@ class CaptureService : Service() {
         /** Kamera přes OpenGL. False = nejde (telefon to neumí) - pokračuje se bez kamery. */
         private fun startWithCamera(v: VideoEncoder): Boolean {
             val ctx = this@CaptureService
-            val low = tier == Device.Tier.LOW
-            val cam = CameraFeed(ctx, settings.camera == "front", pipe, if (low) 360 else 480, if (low) 24 else 30) { st -> onCameraState(st) }
+            val low = tier == Device.Tier.LOW || eco
+            val cam = CameraFeed(ctx, settings.camera == "front", pipe, if (low) 360 else 480, if (eco) 15 else if (low) 24 else 30) { st -> onCameraState(st) }
             if (cam.info == null) {
                 onCameraState("missing")
                 return false
@@ -700,7 +728,7 @@ class CaptureService : Service() {
             if (stopped || reconfiguring) return
             val old = venc ?: return
             val wr = writer ?: return
-            val plans = Device.videoPlans(contentW, contentH, shortSide, fps, tier)
+            val plans = Device.videoPlans(contentW, contentH, curShort, curFps, tier, eco)
             val best = plans.first()
             if (!force && best.width == old.width && best.height == old.height) return
             reconfiguring = true
@@ -721,6 +749,8 @@ class CaptureService : Service() {
                     vd?.resize(nv.width, nv.height, dpi)
                 }
                 updateCamLayout()
+                // Horký telefon: nižší datový tok platí i pro nový kodér.
+                if (heatLevel > 0) nv.setBitrate((nv.plan.bitrate * SizeMath.coolBitrateFactor(heatLevel)).toInt())
                 info = describe(nv)
                 main.post {
                     updateNotification()
@@ -791,34 +821,71 @@ class CaptureService : Service() {
         }
 
         private fun registerThermal() {
-            val pm = getSystemService(PowerManager::class.java) ?: return
-            val l = PowerManager.OnThermalStatusChangedListener { status -> pipe.post { onThermal(status) } }
-            try {
-                pm.addThermalStatusListener(l)
-                thermal = l
-            } catch (e: Exception) {
-                Log.w("teplota: ${e.message}")
+            val pm = getSystemService(PowerManager::class.java)
+            if (pm != null) {
+                try { thermalStatus = pm.currentThermalStatus } catch (_: Exception) { }
+                val l = PowerManager.OnThermalStatusChangedListener { status ->
+                    pipe.post {
+                        thermalStatus = status
+                        evaluateHeat()
+                    }
+                }
+                try {
+                    pm.addThermalStatusListener(l)
+                    thermal = l
+                } catch (e: Exception) {
+                    Log.w("teplota: ${e.message}")
+                }
+            }
+            // Teplota baterie: hlásí ji každý telefon (stav od systému ne každý) - hned a pak každých 20 s.
+            pipe.post(heatPoll)
+        }
+
+        private fun readBattery() {
+            batteryC = try {
+                val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+                val i = if (Build.VERSION.SDK_INT >= 33) registerReceiver(null, filter, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(null, filter)
+                val t = i?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+                // Nesmyslná hodnota (některé telefony hlásí 0 nebo stovky) se nebere.
+                if (t == Int.MIN_VALUE || t <= 0 || t > 800) null else t / 10f
+            } catch (_: Exception) {
+                null
             }
         }
 
-        /** Horký telefon: kamera pauza, méně snímků do kompozice, nižší datový tok; po vychladnutí zpátky. */
-        private fun onThermal(status: Int) {
+        /** Nový stupeň tepla: zahřátí hned, ochlazení po minutě klidu (Heat.next). */
+        private fun evaluateHeat() {
             if (stopped) return
-            if (!hot && status >= PowerManager.THERMAL_STATUS_SEVERE) {
-                hot = true
-                Log.w("telefon je horký ($status) - šetřím")
-                camera?.suspend()
-                comp?.setMaxFps(20)
-                venc?.let { it.setBitrate((it.plan.bitrate * 0.7).toInt()) }
-                addWarning(R.string.warn_hot)
-            } else if (hot && status <= PowerManager.THERMAL_STATUS_LIGHT) {
-                hot = false
-                Log.i("telefon vychladl ($status)")
-                camera?.resume()
-                comp?.setMaxFps(fps)
-                venc?.let { it.setBitrate(it.plan.bitrate) }
-                removeWarning(R.string.warn_hot)
+            val measured = Heat.level(thermalStatus, batteryC)
+            val (next, since) = Heat.next(heatLevel, measured, batteryC, lowerSince, SystemClock.elapsedRealtime())
+            lowerSince = since
+            if (next != heatLevel) applyHeat(next)
+        }
+
+        /**
+         * Horký telefon šetří: teplý = nižší datový tok, horký = menší obraz, 24 fps a kamera
+         * pauza, velmi horký = ještě menší a 20 fps. Po vychladnutí se vrátí datový tok a kamera;
+         * menší obraz zůstane do konce snímání - každé přenastavení kodéru začíná zásobník
+         * znovu (klip by po něm byl krátký), tak jen při zahřátí, ne tam a zpět.
+         */
+        private fun applyHeat(level: Int) {
+            val prev = heatLevel
+            heatLevel = level
+            Log.w("teplota: stupeň $prev -> $level (systém $thermalStatus, baterie ${batteryC ?: "?"} °C)")
+            if (level >= 2 && prev < 2) camera?.suspend()
+            if (level < 2 && prev >= 2) camera?.resume()
+            val wantShort = minOf(curShort, SizeMath.coolShort(shortSide, level))
+            val wantFps = minOf(curFps, SizeMath.coolFps(fps, level))
+            if (wantShort != curShort || wantFps != curFps) {
+                curShort = wantShort
+                curFps = wantFps
+                reconfigure(true)
+            } else {
+                venc?.let { it.setBitrate((it.plan.bitrate * SizeMath.coolBitrateFactor(level)).toInt()) }
             }
+            // Skládání s kamerou drží snímky celého klipu - jen podle kodéru, ne níž.
+            comp?.setMaxFps(curFps)
+            if (level >= 1) addWarning(R.string.warn_hot) else removeWarning(R.string.warn_hot)
         }
 
         /** Konec: všechno uklidit na vlákně kine-pipe, pak [done]. */
