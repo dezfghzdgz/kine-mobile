@@ -39,7 +39,8 @@ import kotlin.math.min
  * Vzhled „Tlačítko“ (výchozí): kulaté tlačítko 52 dp - dobře vidět. Vzhled „Proužek“:
  * tenká čárka u okraje obrazovky (plocha na dotyk je větší, ale průhledná) - v klipu
  * skoro není vidět. Úplně mimo klip je bublina, když na Androidu 14+ v okně systému
- * zvolíš „Jedna aplikace“ (nahrává se jen hra).
+ * zvolíš „Jedna aplikace“ (nahrává se jen hra). Oranžová / červená tečka = telefon je
+ * horký (co s tím, říká oznámení a appka).
  */
 class Bubble(base: Context, private val settings: Settings, private val onClip: () -> Unit, private val onLongPress: () -> Unit) {
     enum class State { STARTING, READY, SAVING, SAVED, FAILED }
@@ -170,6 +171,11 @@ class Bubble(base: Context, private val settings: Settings, private val onClip: 
         }
     }
 
+    /** Horký telefon: 0 nic, 1 oranžová tečka (horký), 2 červená (velmi horký). Z kteréhokoli vlákna. */
+    fun setHot(level: Int) {
+        main.post { view?.hot = level }
+    }
+
     /** Po otočení / změně obrazovky: zpátky na zapamatovaný okraj a výšku. */
     fun relayout() {
         main.post {
@@ -291,6 +297,14 @@ private class BubbleView(context: Context, private val edge: Boolean, private va
             field = value
             invalidate()
         }
+    /** Tečka „telefon je horký“: 0 žádná, 1 oranžová, 2 červená. */
+    var hot = 0
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+    private val dot = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE6121417.toInt() }
     private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -378,6 +392,7 @@ private class BubbleView(context: Context, private val edge: Boolean, private va
             pill.color = col
             pill.alpha = (235 * glow).toInt().coerceIn(60, 235)
             c.drawRoundRect(rect, pw / 2f, pw / 2f, pill)
+            if (hot > 0) drawHotDot(c, if (side == "left") 6f * density else w - 6f * density, rect.top - 6f * density, 3.5f * density)
             return
         }
         val r = min(w, h) / 2f - 4f * density
@@ -395,6 +410,18 @@ private class BubbleView(context: Context, private val edge: Boolean, private va
             it.setBounds(l, t, l + s, t + s)
             it.draw(c)
         }
+        // Tečka vpravo nahoře (u levého okraje vlevo nahoře - blíž středu obrazovky).
+        if (hot > 0) {
+            val off = r * 0.72f
+            drawHotDot(c, if (side == "left") w / 2f + off else w / 2f - off, h / 2f - off, 5f * density)
+        }
         c.restore()
+    }
+
+    private fun drawHotDot(c: Canvas, x: Float, y: Float, radius: Float) {
+        dot.color = 0xFF121417.toInt()
+        c.drawCircle(x, y, radius + 1.5f * density, dot)
+        dot.color = if (hot >= 2) Palette.RED else Palette.AMBER
+        c.drawCircle(x, y, radius, dot)
     }
 }

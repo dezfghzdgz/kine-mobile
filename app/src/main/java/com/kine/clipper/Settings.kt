@@ -31,12 +31,25 @@ class Settings(context: Context) {
         set(v) = p.edit().putInt("fps", v.coerceIn(15, 60)).apply()
 
     /**
-     * Šetrný režim (méně hřeje): 480p, 24 fps, nižší datový tok, kamera 15 fps. Výchozí
-     * zapnutý na slabém telefonu (dokud si ho člověk sám nepřepne).
+     * Šetrný režim (méně hřeje): 480p, 24 fps, nižší datový tok, kamera 15 fps. Jen když
+     * si ho člověk zapne (od 0.4.1 ani na slabém telefonu sám ne - appka ho jen doporučí).
      */
-    fun ecoMode(tier: Device.Tier): Boolean = if (p.contains("ecoMode")) p.getBoolean("ecoMode", false) else tier == Device.Tier.LOW
+    var ecoMode: Boolean
+        get() = p.getBoolean("ecoMode", false)
+        set(v) = p.edit().putBoolean("ecoMode", v).apply()
 
-    fun setEcoMode(on: Boolean) = p.edit().putBoolean("ecoMode", on).apply()
+    /**
+     * Při zahřátí snížit kvalitu (datový tok, pak rozměr a snímky). Výchozí vypnuto -
+     * kvalita zůstane, jak si ji kdo nastavil, a appka jen upozorní, že telefon hřeje.
+     */
+    var heatAuto: Boolean
+        get() = p.getBoolean("heatAuto", false)
+        set(v) = p.edit().putBoolean("heatAuto", v).apply()
+
+    /** Těžké nastavení, u kterého člověk upozornění odklikl („720p30c“) - pro jiné se ukáže znovu. */
+    var heavyAck: String?
+        get() = p.getString("heavyAck", null)
+        set(v) = p.edit().putString("heavyAck", v).apply()
 
     /** Kratší strana obrazu v px pro tuhle kvalitu a telefon (šetrný režim nejvýš 480p). */
     fun shortSide(tier: Device.Tier, older: Boolean, eco: Boolean): Int {
@@ -49,12 +62,8 @@ class Settings(context: Context) {
         return if (eco) minOf(q, 480) else q
     }
 
-    /** Snímky za sekundu: šetrný režim 24, v Auto na slabém telefonu 30, jinak podle volby. */
-    fun targetFps(tier: Device.Tier, eco: Boolean): Int = when {
-        eco -> minOf(24, fps)
-        quality == "auto" && tier == Device.Tier.LOW -> 30
-        else -> fps
-    }
+    /** Snímky za sekundu: šetrný režim nejvýš 24, jinak podle volby (i na slabém telefonu - jen upozorní). */
+    fun targetFps(eco: Boolean): Int = if (eco) minOf(24, fps) else fps
 
     /** Kamera v klipu: "off" / "front" / "back". */
     var camera: String

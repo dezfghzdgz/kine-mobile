@@ -95,8 +95,8 @@ Android SDK 35).
   zvuk 96 kb/s. Ostatní 720p / 30 fps / ~4 Mb/s. Ručně 480p / 720p / 1080p, 30 / 60 fps.
 - Hlavní vlákno nikdy nečeká (start, otočení, stop, deník na disk - vše jinde);
   start i stop hlídá časovač, appka nikdy nezůstane viset na „Spouští se…“.
-- Spadlý kodér (systém si ho vezme pro jinou appku) se obnoví; horký telefon
-  šetří po stupních (viz Méně tepla), po vychladnutí zpátky.
+- Spadlý kodér (systém si ho vezme pro jinou appku) se obnoví; na horký telefon
+  appka upozorní (viz Teplo), kvalitu sama nemění.
 - Seznam klipů recykluje řádky a náhledy načítá na pozadí (max. ~6 MB v paměti).
 
 ### Méně tepla (0.4.0)
@@ -104,17 +104,39 @@ Android SDK 35).
 - **Starší telefon** (`Device.older`: Android 11 a starší, nebo bez výkonnostní třídy
   médií a s pamětí „4 GB“ a míň) dostane v Auto **540p** místo 720p; telefon s 8 GB,
   ale starý (Android 11), už nedostane nastavení „nového“.
-- **Šetrný režim** (Nastavení -> Klip, na slabém telefonu zapnutý od začátku):
-  480p / 24 fps / ~1,2 Mb/s, kamera 15 fps, zvuk 96 kb/s.
-- **Hlídání teploty**: stav od systému (Android 10+) i teplota baterie každých 20 s
-  (hlásí ji každý telefon). Teplý (od 40 °C / MODERATE) = datový tok 75 %, kamera
-  20 fps; horký (od 43 °C / SEVERE) = o stupeň menší obraz (720 -> 540), 24 fps,
-  kamera pauza; velmi horký (od 46 °C / CRITICAL) = ještě menší, 20 fps, tok 60 %.
-  Datový tok a kamera se vrátí po minutě klidu a o 1,5 °C níž, po stupních (žádné
-  cukání); menší obraz zůstane do konce snímání - každé přenastavení kodéru začíná
-  zásobník znovu, tak jen při zahřátí. Čistý výpočet `Heat` / `SizeMath` jde ověřit
-  mimo telefon.
+- **Šetrný režim** (Nastavení -> Klip, jen když si ho kdo zapne - od 0.4.1 ani na
+  slabém telefonu sám ne): 480p / 24 fps / ~1,2 Mb/s, kamera 15 fps, zvuk 96 kb/s.
 - Kodér jede tempem snímků (`KEY_OPERATING_RATE`), ne naplno.
+
+### Teplo: jen upozornění (0.4.1)
+
+Kvalitu si každý nastaví sám - appka ji při horku sama nemění (lepší telefon by
+zbytečně přišel o kvalitu), jen upozorní:
+
+- **Před startem** (`SizeMath.loadLevel`): zátěž = pixely × snímky (+25 % s kamerou)
+  proti tomu, co telefon zvládá bez většího hřátí (slabý 480p30, starší 540p30,
+  běžný 720p60, rychlý 1080p60). Od 1,3× „může víc hřát“, od 1,75× „asi se bude
+  přehřívat a může běžet na méně snímků/s“ - pod kvalitou v Nastavení a na hlavní
+  obrazovce (tlačítko OK ho pro tohle nastavení schová). Pod kvalitou je i to, co
+  kodér telefonu opravdu nezvládne (např. „v 1080p jen 30 snímků/s“, „nejvýš 720p“,
+  „jen softwarový kodér“) - ověřené přes `Device.videoPlans`.
+- **Během hraní** (`Heat.warning`): stav teploty od systému (Android 10+), jeho
+  předpověď na 30 s (`getThermalHeadroom`, Android 11+) a teplota baterie každých
+  20 s. Teplý telefon (baterie od 40 °C - při hraní běžné) se neohlašuje; horký (od
+  43 °C / SEVERE, nebo předpověď ≥ 0,95) = „hra i klip můžou zpomalit“; velmi horký
+  (od 46 °C / CRITICAL) = „Android může nahrávání zpomalit nebo zastavit“. Text je
+  v appce i v oznámení (celý po rozbalení), na bublině oranžová / červená tečka a přes
+  hru jednou krátká hláška (znovu nejdřív po 5 min, nebo když je hůř; při nahrávání
+  celé obrazovky je ~3 s vidět i v klipu, s „Jedna aplikace“ ne).
+- **Při zahřátí snížit kvalitu** (Nastavení -> Klip, výchozí vypnuto): kdo chce, ať
+  appka šetří sama - teplý = datový tok 75 %; horký = o stupeň menší obraz
+  (720 -> 540), 24 fps, kamera pauza; velmi horký = ještě menší, 20 fps, tok 60 %.
+  Datový tok a kamera se vrátí po minutě klidu a o 1,5 °C níž, po stupních; menší
+  obraz zůstane do konce snímání (přenastavení kodéru začíná zásobník znovu) - do té
+  doby appka píše „Kvůli horku Kine ubralo kvalitu“.
+- Snímky/s podle volby i na slabém telefonu (dřív Auto na slabém telefonu tiše
+  stáhlo 60 na 30) - jen upozorní. Čistý výpočet `Heat` / `SizeMath` jde ověřit mimo
+  telefon.
 
 ## Co zatím chybí / omezení
 
@@ -122,4 +144,9 @@ Android SDK 35).
   rozměrem se nelepí - bez překódování to nejde).
 - Úpravy klipu (zkrácení, text, překryvy) - zatím jen na PC / webu.
 - iPhone: nahrávání jiné appky jde jen přes systémové „Nahrávání obrazovky“
-  s rozšířením (ReplayKit), bez kamery přes hru a bez bubliny - jiný projekt.
+  s rozšířením (ReplayKit, limit paměti 50 MB), bez bubliny přes hru - jiný projekt
+  (Swift, sestavení na macOS přes GitHub Actions, placený účet Apple Developer).
+- Google Play: nové appky musí mířit na Android 16 (`targetSdk 36`, od 31. 8. 2026;
+  teď 34), nahrává se balík AAB podepsaný nahrávacím klíčem, v Play Console
+  prohlášení k službě na popředí `mediaProjection` (popis + video). Nový osobní
+  účet: uzavřený test s 12 testery 14 dní v kuse, pak žádost o produkci.

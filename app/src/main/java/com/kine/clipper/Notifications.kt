@@ -53,6 +53,8 @@ object Notifications {
             .setColor(Palette.BRAND)
             .setContentTitle(title)
             .setContentText(text)
+            // Delší text (upozornění na horko) celý po rozbalení, ne useknutý na jeden řádek.
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setContentIntent(openApp(context))
             .setOngoing(true)
             .setOnlyAlertOnce(true)

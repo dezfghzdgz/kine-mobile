@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Point
+import android.hardware.display.DisplayManager
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -20,6 +22,7 @@ import android.os.SystemClock
 import android.provider.Settings as SysSettings
 import android.text.InputType
 import android.text.TextUtils
+import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -82,6 +85,10 @@ class MainActivity : Activity() {
     private lateinit var accountName: TextView
     private lateinit var accountBtn: Btn
     private lateinit var settingsNote: TextView
+    /** Upozornění pod kvalitou (těžké nastavení / co kodér telefonu nezvládne). */
+    private lateinit var loadNote: TextView
+    private var loadToken = 0
+    private val bg = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "kine-load").apply { isDaemon = true } }
 
     // Start: oprávnění -> bublina -> povolení nahrávání obrazovky
     private var askedPermissions = false
@@ -152,6 +159,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
         thumbs.close()
+        bg.shutdownNow()
         super.onDestroy()
     }
 
@@ -452,6 +460,7 @@ class MainActivity : Activity() {
                     Toast.makeText(this, R.string.applies_after_restart, Toast.LENGTH_SHORT).show()
                 } else {
                     toggle()
+                    renderLoadNote()
                     renderStatus()
                 }
             }
@@ -493,7 +502,89 @@ class MainActivity : Activity() {
         val w = CaptureService.warning
         if (!idle && w != null) alert(w, Palette.AMBER, Palette.AMBER_SOFT, null, null)
         if (idle && err != null) alert(err, Palette.RED, Palette.RED_SOFT, getString(R.string.send_log)) { sendLog() }
+        // Těžké nastavení pro tenhle telefon: upozornit ještě před startem (nic se samo nemění).
+        // „OK“ ho pro tohle nastavení schová - kdo chce 1080p60 i na slabším telefonu, smí.
+        val heavy = heavySignature()
+        if (idle && err == null && heavy != null && heavy != settings.heavyAck) {
+            alert(getString(R.string.alert_heavy), Palette.AMBER, Palette.AMBER_SOFT, getString(R.string.ok)) {
+                settings.heavyAck = heavy
+                renderStatus()
+            }
+        }
         alertsBox.visibility = if (alertsBox.childCount > 0) View.VISIBLE else View.GONE
+    }
+
+    /** Nastavení teď (rozměr, snímky, kamera) - a jak těžké je pro tenhle telefon (0-2, SizeMath.loadLevel). */
+    private fun loadNow(): Triple<Int, Int, Int> {
+        val tier = Device.tier(this)
+        val older = Device.older(this)
+        val eco = settings.ecoMode
+        val short = settings.shortSide(tier, older, eco)
+        val fps = settings.targetFps(eco)
+        return Triple(short, fps, SizeMath.loadLevel(short, fps, settings.camera != "off", tier == Device.Tier.LOW, older, tier == Device.Tier.HIGH))
+    }
+
+    /** Podpis těžkého nastavení (např. „720p30c“), null = nastavení není na tenhle telefon těžké. */
+    private fun heavySignature(): String? {
+        val (short, fps, level) = loadNow()
+        return if (level >= 2) "${short}p$fps${if (settings.camera != "off") "c" else ""}" else null
+    }
+
+    /**
+     * Upozornění pod kvalitou: co kodér telefonu v tomhle nastavení nezvládne (méně fps,
+     * menší obraz, jen software) a jestli to asi bude hřát. Nic se samo nemění - rozhodne člověk.
+     */
+    private fun renderLoadNote() {
+        if (!::loadNote.isInitialized) return
+        val (short, fps, level) = loadNow()
+        val tier = Device.tier(this)
+        val eco = settings.ecoMode
+        val token = ++loadToken
+        val screen = screenSize()
+        try {
+            bg.execute {
+                // Seznam kodérů chvíli trvá - mimo hlavní vlákno.
+                val best = try { Device.videoPlans(screen.x, screen.y, short, fps, tier, eco).firstOrNull() } catch (_: Exception) { null }
+                main.post { if (token == loadToken && !isDestroyed) showLoadNote(level, short, fps, best, screen) }
+            }
+        } catch (_: Exception) {
+            showLoadNote(level, short, fps, null, screen)
+        }
+    }
+
+    private fun showLoadNote(level: Int, short: Int, fps: Int, best: Device.VideoPlan?, screen: Point) {
+        val lines = ArrayList<String>()
+        if (best != null) {
+            val (ew, eh) = SizeMath.fit(screen.x, screen.y, short, 16)
+            val bestShort = minOf(best.width, best.height)
+            // Kodér má rozměr zarovnaný na 16 px (1080 -> 1072) - ukázat jako obvyklý stupeň.
+            val label = listOf(1080, 720, 540, 480, 360).firstOrNull { kotlin.math.abs(it - bestShort) < 16 } ?: bestShort
+            if (bestShort < minOf(ew, eh) - 16) lines.add(getString(R.string.load_size_limit, label))
+            if (best.fps < fps) lines.add(getString(R.string.load_fps_limit, label, best.fps))
+            if (!best.hardware) lines.add(getString(R.string.load_software))
+        }
+        when (level) {
+            2 -> lines.add(getString(R.string.load_heavy))
+            1 -> lines.add(getString(R.string.load_warm))
+        }
+        loadNote.text = lines.joinToString("\n")
+        loadNote.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun screenSize(): Point {
+        val p = Point()
+        try {
+            @Suppress("DEPRECATION")
+            getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealSize(p)
+        } catch (_: Exception) {
+            p.x = resources.displayMetrics.widthPixels
+            p.y = resources.displayMetrics.heightPixels
+        }
+        if (p.x <= 0 || p.y <= 0) {
+            p.x = 1080
+            p.y = 2340
+        }
+        return p
     }
 
     /** Oznámení: poprvé okno Androidu, po odmítnutí (Android už okno neukáže) nastavení appky. */
@@ -735,17 +826,31 @@ class MainActivity : Activity() {
             renderStatus()
         }))
         val qualities = listOf("auto", "480", "720", "1080")
-        // Šetrný režim má nejvýš 480p - nápověda k Auto ať neříká víc.
-        val autoP = "${if (settings.ecoMode(tier)) 480 else SizeMath.autoShort(tier == Device.Tier.LOW, Device.older(this))}p"
+        val autoP = "${SizeMath.autoShort(tier == Device.Tier.LOW, Device.older(this))}p"
         clip.addView(ui.field(getString(R.string.quality), ui.segmented(listOf(getString(R.string.quality_auto), "480p", "720p", "1080p"), qualities.indexOf(settings.quality).coerceAtLeast(0)) { i ->
             settings.quality = qualities[i]
+            renderLoadNote()
+            renderStatus()
         }, getString(R.string.quality_auto_hint, autoP)))
-        clip.addView(ui.field(getString(R.string.frame_rate), ui.segmented(listOf("30", "60"), if (settings.fps >= 60) 1 else 0) { i -> settings.fps = if (i == 1) 60 else 30 }))
-        // Šetrný režim: méně hřeje (starší telefony). Na horko appka reaguje sama i bez něj.
-        clip.addView(ui.switchRow(getString(R.string.eco_mode), null, settings.ecoMode(tier), getString(R.string.eco_mode_hint)) { on ->
-            settings.setEcoMode(on)
+        clip.addView(ui.field(getString(R.string.frame_rate), ui.segmented(listOf("30", "60"), if (settings.fps >= 60) 1 else 0) { i ->
+            settings.fps = if (i == 1) 60 else 30
+            renderLoadNote()
+            renderStatus()
+        }))
+        // Kvalitu volí člověk - appka jen řekne, když je na tenhle telefon těžká (hřátí / míň fps).
+        loadNote = ui.text("", 13f, Palette.AMBER).apply {
+            visibility = View.GONE
+            background = ui.round(Palette.AMBER_SOFT, 12)
+            setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8))
+        }
+        clip.addView(loadNote, ui.matchWrap().apply { topMargin = ui.dp(2); bottomMargin = ui.dp(6) })
+        clip.addView(ui.switchRow(getString(R.string.eco_mode), null, settings.ecoMode, getString(R.string.eco_mode_hint)) { on ->
+            settings.ecoMode = on
+            renderLoadNote()
             renderStatus()
         })
+        // Při zahřátí snížit kvalitu: výchozí vypnuto (jen upozornění) - kdo chce, zapne si.
+        clip.addView(ui.switchRow(getString(R.string.heat_auto), null, settings.heatAuto, getString(R.string.heat_auto_hint)) { settings.heatAuto = it })
         box.addView(clip)
 
         // Bublina
@@ -770,6 +875,7 @@ class MainActivity : Activity() {
         val cams = listOf("off", "front", "back")
         camera.addView(ui.segmented(listOf(getString(R.string.camera_off), getString(R.string.camera_front), getString(R.string.camera_back)), cams.indexOf(settings.camera).coerceAtLeast(0)) { i ->
             settings.camera = cams[i]
+            renderLoadNote()
             renderStatus()
         }, ui.matchWrap().apply { bottomMargin = ui.dp(6) })
         camera.addView(ui.field(getString(R.string.camera_size), ui.seek(38, ((settings.cameraScale - 0.12f) * 100).toInt()) { p -> settings.cameraScale = 0.12f + p / 100f }))
@@ -840,6 +946,7 @@ class MainActivity : Activity() {
         app.addView(ui.text(getString(R.string.version, version) + " · " + getString(R.string.phone_class, tierName), 13f, Palette.DIM), ui.matchWrap().apply { bottomMargin = ui.dp(10) })
         app.addView(ui.button(getString(R.string.send_log), R.drawable.ic_share, Ui.Kind.GHOST) { sendLog() }.root, ui.matchWrap())
         box.addView(app)
+        renderLoadNote()
         return scroll
     }
 

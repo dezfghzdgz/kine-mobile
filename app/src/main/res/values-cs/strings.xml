@@ -44,7 +44,7 @@
     <string name="warn_game_audio_failed">Zvuk hry nejde</string>
     <string name="warn_mic_failed">Mikrofon nejde</string>
     <string name="warn_camera_failed">Kamera v klipu na tomhle telefonu nejde</string>
-    <string name="warn_hot">Telefon je teplý - nižší kvalita, ať tolik nehřeje</string>
+    <string name="warn_hot">Telefon je horký - hra i klip můžou zpomalit (méně snímků/s). Pomůže nižší kvalita nebo Šetrný režim</string>
     <string name="warn_background_start">Zvuk a kamera potřebují při startu otevřenou appku - tentokrát jen obrazovka</string>
     <string name="warn_overlay">Bublina potřebuje „Zobrazení přes jiné aplikace“</string>
     <string name="warn_overlay_lowram">Tenhle telefon bublinu nedovolí - klipuj tlačítkem Klip v oznámení nebo zatřesením</string>
@@ -142,12 +142,27 @@
     <string name="site_url">Adresa Kine (testovací sestavení)</string>
     <string name="version">Verze %1$s</string>
     <string name="phone_class">telefon: %1$s</string>
-    <string name="tier_low">starší (lehký režim)</string>
+    <string name="tier_low">slabší</string>
     <string name="tier_mid">běžný</string>
     <string name="tier_high">rychlý</string>
     <string name="overlay_title">Bublina přes hru</string>
     <string name="overlay_text">Povol pro Kine Clipper „Zobrazení přes jiné aplikace“ - bublina Klip pak bude nad hrou. Bez toho klipuješ z oznámení.</string>
     <string name="overlay_skip">Bez bubliny</string>
     <string name="eco_mode">Šetrný režim (méně hřeje)</string>
-    <string name="eco_mode_hint">480p · 24 fps · nižší datový tok, kamera 15 fps. Pro starší telefony, které hřejí. Když se telefon zahřeje, Kine kvalitu sníží samo i bez toho.</string>
+    <string name="eco_mode_hint">480p · 24 fps · nižší datový tok, kamera 15 fps. Doporučené, když telefon hřeje nebo hra seká.</string>
+    <!-- Teplo a zátěž (0.4.1) -->
+    <string name="warn_very_hot">Telefon je moc horký - Android může nahrávání zpomalit nebo zastavit. Dej mu pauzu nebo sniž kvalitu</string>
+    <string name="warn_hot_auto">Kvůli horku Kine ubralo kvalitu (vypneš v Nastavení → Při zahřátí snížit kvalitu)</string>
+    <string name="heat_auto">Při zahřátí snížit kvalitu</string>
+    <string name="heat_auto_hint">Vypnuto (výchozí): kvalita zůstane, jak ji nastavíš - Kine jen upozorní, když telefon hřeje. Zapnuto: při zahřátí Kine samo ubere datový tok, pak rozměr a snímky/s.</string>
+    <string name="load_warm">Na tomhle telefonu může víc hřát</string>
+    <string name="load_heavy">Na tomhle telefonu se to asi bude přehřívat a může běžet na méně snímků/s - pomůže nižší kvalita nebo Šetrný režim</string>
+    <string name="load_fps_limit">Tenhle telefon zvládne v %1$dp jen %2$d snímků/s</string>
+    <string name="load_size_limit">Tenhle telefon nahraje nejvýš %1$dp</string>
+    <string name="load_software">Na tohle nemá telefon hardwarový kodér - bude víc hřát</string>
+    <string name="alert_heavy">Nastavení je na tenhle telefon těžké - může se přehřívat nebo běžet na méně snímků/s (změníš v Nastavení → Klip)</string>
+    <string name="toast_hot">Telefon je horký - hra i klip můžou zpomalit</string>
+    <string name="toast_very_hot">Telefon je moc horký - Android může nahrávání zpomalit</string>
+    <string name="toast_hot_auto">Kvůli horku Kine ubralo kvalitu</string>
+    <string name="ok">OK</string>
 </resources>

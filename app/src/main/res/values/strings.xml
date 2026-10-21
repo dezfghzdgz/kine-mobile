@@ -44,7 +44,7 @@
     <string name="warn_game_audio_failed">Game sound unavailable</string>
     <string name="warn_mic_failed">Microphone unavailable</string>
     <string name="warn_camera_failed">Camera in clips isn\'t possible on this phone</string>
-    <string name="warn_hot">Phone is warm - lower quality so it heats less</string>
+    <string name="warn_hot">Phone is hot - the game and clip may slow down (lower FPS). Lower quality or Cool mode helps</string>
     <string name="warn_background_start">Sound and camera need Kine Clipper open at Start - this time only the screen</string>
     <string name="warn_overlay">Bubble needs “Display over other apps”</string>
     <string name="warn_overlay_lowram">This phone doesn\'t allow the bubble - use Clip in the notification or Shake = clip</string>
@@ -142,12 +142,27 @@
     <string name="site_url">Kine address (test build)</string>
     <string name="version">Version %1$s</string>
     <string name="phone_class">phone: %1$s</string>
-    <string name="tier_low">older (light mode)</string>
+    <string name="tier_low">low-end</string>
     <string name="tier_mid">standard</string>
     <string name="tier_high">fast</string>
     <string name="overlay_title">Bubble over games</string>
     <string name="overlay_text">Allow “Display over other apps” for Kine Clipper - the Clip bubble then floats over your game. Without it, clip from the notification.</string>
     <string name="overlay_skip">Without bubble</string>
     <string name="eco_mode">Cool mode (less heat)</string>
-    <string name="eco_mode_hint">480p · 24 fps · lower bitrate, camera 15 fps. For older phones that get hot. When the phone heats up, Kine lowers the quality on its own anyway.</string>
+    <string name="eco_mode_hint">480p · 24 fps · lower bitrate, camera 15 fps. Recommended when the phone gets hot or the game lags.</string>
+    <!-- Teplo a zátěž (0.4.1) -->
+    <string name="warn_very_hot">Phone is very hot - Android may slow down or stop the recording. Give it a break or lower the quality</string>
+    <string name="warn_hot_auto">Kine lowered the quality because of heat (Settings → Lower quality when hot)</string>
+    <string name="heat_auto">Lower quality when hot</string>
+    <string name="heat_auto_hint">Off (default): quality stays as you set it - Kine only warns when the phone gets hot. On: when hot, Kine lowers the bitrate first, then size and FPS.</string>
+    <string name="load_warm">May run warmer on this phone</string>
+    <string name="load_heavy">On this phone this will probably overheat and may run at lower FPS - lower quality or Cool mode helps</string>
+    <string name="load_fps_limit">This phone does only %2$d FPS at %1$dp</string>
+    <string name="load_size_limit">This phone records at most %1$dp</string>
+    <string name="load_software">No hardware encoder for this - the phone will heat more</string>
+    <string name="alert_heavy">These settings are heavy for this phone - it may overheat or drop FPS (change in Settings → Clip)</string>
+    <string name="toast_hot">Phone is hot - the game and clip may slow down</string>
+    <string name="toast_very_hot">Phone is very hot - Android may slow down the recording</string>
+    <string name="toast_hot_auto">Kine lowered the quality because of heat</string>
+    <string name="ok">OK</string>
 </resources>

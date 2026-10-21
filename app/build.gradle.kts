@@ -12,8 +12,8 @@ android {
         // Android 10+: zvuk hry (AudioPlaybackCapture) a ukládání do Galerie přes MediaStore bez oprávnění k úložišti.
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.4.1"
     }
 
     // Ostrý podpis z prostředí (GitHub Actions: tajemství KEYSTORE_* a cesta KINE_KEYSTORE); bez něj se release nepodepíše.

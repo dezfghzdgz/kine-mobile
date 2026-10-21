@@ -48,9 +48,11 @@ import kotlin.math.min
  * kodér přenastaví na nový rozměr - klip není zmenšený v černém rámu. Spadlý kodér
  * se zkusí obnovit.
  *
- * Teplo (hlavně starší telefony): hlídá se stav teploty od systému i teplota baterie
- * (každých 20 s). Teplý telefon -> nižší datový tok; horký -> menší obraz, 24 fps,
- * kamera pauza; velmi horký -> ještě menší. Zpátky po minutě klidu, po stupních.
+ * Teplo: hlídá se stav teploty od systému, jeho předpověď a teplota baterie (každých
+ * 20 s). Výchozí je jen upozornění (appka, oznámení, tečka na bublině, jednou krátká
+ * hláška) - kvalita zůstane, jak si ji kdo nastavil. Se zapnutým „Při zahřátí snížit
+ * kvalitu“: teplý -> nižší datový tok; horký -> menší obraz, 24 fps, kamera pauza;
+ * velmi horký -> ještě menší. Zpátky po minutě klidu, po stupních.
  */
 class CaptureService : Service() {
     companion object {
@@ -116,6 +118,12 @@ class CaptureService : Service() {
     private var shake: ShakeDetector? = null
     private var clipBusy = false
     private val warnings = LinkedHashSet<Int>()
+    /** Upozornění na horko, které teď platí (text v appce, oznámení a tečka na bublině); 0 = žádné. */
+    private var heatRes = 0
+    private var heatLvl = 0
+    private var heatDotShown = 0
+    private var lastHeatToastAt = 0L
+    private var lastHeatToastLvl = 0
     private val startWatchdog = Runnable { if (state == STARTING) fail(getString(R.string.err_timeout)) }
     private val finishWatchdog = Runnable { finish() }
     private val prepareWatchdog = Runnable {
@@ -188,6 +196,11 @@ class CaptureService : Service() {
         error = null
         warning = null
         warnings.clear()
+        heatRes = 0
+        heatLvl = 0
+        heatDotShown = 0
+        lastHeatToastAt = 0L
+        lastHeatToastLvl = 0
         info = ""
         cameraState = ""
         val audioPerm = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -374,6 +387,7 @@ class CaptureService : Service() {
         if (b.shown) {
             bubble = b
             bubbleShown = true
+            if (heatDotShown > 0) b.setHot(heatDotShown)
         }
     }
 
@@ -413,6 +427,47 @@ class CaptureService : Service() {
         broadcast()
     }
 
+    /**
+     * Horký telefon (hlavní vlákno): [level] 0 nic, 1 horký, 2 velmi horký; [reduced] = Kine
+     * kvůli horku ubralo kvalitu (jen se zapnutým „Při zahřátí snížit kvalitu“); [dot] =
+     * tečka na bublině. Celý text je v appce a v oznámení; přes hru jednou krátká hláška
+     * (znovu nejdřív po 5 min, nebo když je hůř) - v klipu ji nahraje jen celá obrazovka.
+     */
+    private fun showHeat(level: Int, reduced: Boolean, dot: Int) {
+        if (state != RUNNING && state != STARTING) return
+        val res = when {
+            level >= 2 -> R.string.warn_very_hot
+            reduced -> R.string.warn_hot_auto
+            level >= 1 -> R.string.warn_hot
+            else -> 0
+        }
+        val toastRes = when {
+            level >= 2 -> R.string.toast_very_hot
+            reduced -> R.string.toast_hot_auto
+            level >= 1 -> R.string.toast_hot
+            else -> 0
+        }
+        val lvl = maxOf(level, if (reduced) 1 else 0)
+        bubble?.setHot(dot)
+        heatDotShown = dot
+        if (res == heatRes && lvl == heatLvl) return
+        val prevLvl = heatLvl
+        heatLvl = lvl
+        warnings.removeAll(listOf(R.string.warn_hot, R.string.warn_very_hot, R.string.warn_hot_auto).toSet())
+        if (res != 0) warnings.add(res)
+        heatRes = res
+        publishWarnings()
+        updateNotification()
+        if (toastRes != 0 && lvl > prevLvl) {
+            val now = SystemClock.elapsedRealtime()
+            if (lastHeatToastAt == 0L || now - lastHeatToastAt >= 5 * 60_000L || lvl > lastHeatToastLvl) {
+                lastHeatToastAt = now
+                lastHeatToastLvl = lvl
+                try { Toast.makeText(this, toastRes, Toast.LENGTH_LONG).show() } catch (_: Exception) { }
+            }
+        }
+    }
+
     private fun updateNotification() {
         if (state == IDLE) return
         val title = when (state) {
@@ -422,6 +477,7 @@ class CaptureService : Service() {
         }
         val text = when {
             state != RUNNING -> getString(R.string.notif_starting_text)
+            heatRes != 0 -> getString(heatRes)
             bubble != null -> getString(R.string.notif_text_bubble)
             else -> getString(R.string.notif_text)
         }
@@ -491,19 +547,30 @@ class CaptureService : Service() {
         private var lastRotation = -1
         /** Šetrný režim (nastavení): 480p, 24 fps, nižší datový tok. */
         private var eco = false
-        /** Rozměr a snímky, které teď platí - při horkém telefonu menší než [shortSide] / [fps]. */
+        /** „Při zahřátí snížit kvalitu“ (nastavení, výchozí vypnuto = jen upozornit). */
+        private var heatAuto = false
+        /** Rozměr a snímky, které teď platí - se zapnutým [heatAuto] při horku menší než [shortSide] / [fps]. */
         private var curShort = 720
         private var curFps = 30
         /** Jak horký je telefon: 0 normální, 1 teplý, 2 horký, 3 velmi horký (viz [Heat]). */
         private var heatLevel = 0
+        /** Ukázané upozornění na horko: 0 nic, 1 horký, 2 velmi horký (viz [Heat.warning]). */
+        private var heatWarn = 0
+        /** Kvalita je kvůli horku snížená (jen se zapnutým [heatAuto]; menší obraz zůstane do Zastavit). */
+        private var heatReduced = false
+        /** Tečka na bublině: 0 nic, 1 horký, 2 velmi horký. */
+        private var heatDot = 0
         private var thermalStatus = 0
         private var batteryC: Float? = null
+        /** Předpověď systému na 30 s (PowerManager.getThermalHeadroom, Android 11+), NaN = nehlásí. */
+        private var headroom = Float.NaN
         private var lowerSince = 0L
         private var thermal: PowerManager.OnThermalStatusChangedListener? = null
         private val heatPoll = object : Runnable {
             override fun run() {
                 if (stopped) return
                 readBattery()
+                readHeadroom()
                 evaluateHeat()
                 pipe.postDelayed(this, 20_000)
             }
@@ -567,13 +634,16 @@ class CaptureService : Service() {
             try {
                 val ctx = this@CaptureService
                 tier = Device.tier(ctx)
-                eco = settings.ecoMode(tier)
+                eco = settings.ecoMode
+                heatAuto = settings.heatAuto
                 val older = Device.older(ctx)
                 shortSide = settings.shortSide(tier, older, eco)
-                fps = settings.targetFps(tier, eco)
+                fps = settings.targetFps(eco)
                 curShort = shortSide
                 curFps = fps
-                Log.i("start: ${Device.describe(ctx)}${if (older) ", starší telefon" else ""}; kvalita ${settings.quality}${if (eco) " + šetrný režim" else ""} -> ${shortSide}p / $fps fps, kamera ${if (useCamera) settings.camera else "ne"}, zvuk ${if (useAudio) "hra ${settings.gameAudio} + mikrofon ${settings.microphone}" else "ne"}")
+                Log.i("start: ${Device.describe(ctx)}${if (older) ", starší telefon" else ""}; kvalita ${settings.quality}${if (eco) " + šetrný režim" else ""} -> ${shortSide}p / $fps fps" +
+                    " (zátěž ${SizeMath.loadLevel(shortSide, fps, useCamera, tier == Device.Tier.LOW, older, tier == Device.Tier.HIGH)}/2, při horku ${if (heatAuto) "snížit kvalitu" else "jen upozornit"})" +
+                    ", kamera ${if (useCamera) settings.camera else "ne"}, zvuk ${if (useAudio) "hra ${settings.gameAudio} + mikrofon ${settings.microphone}" else "ne"}")
                 val display = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: throw IllegalStateException("no display")
                 val size = realSize(display)
                 screenW = size.x
@@ -749,8 +819,8 @@ class CaptureService : Service() {
                     vd?.resize(nv.width, nv.height, dpi)
                 }
                 updateCamLayout()
-                // Horký telefon: nižší datový tok platí i pro nový kodér.
-                if (heatLevel > 0) nv.setBitrate((nv.plan.bitrate * SizeMath.coolBitrateFactor(heatLevel)).toInt())
+                // Horký telefon a zapnuté „Při zahřátí snížit kvalitu“: nižší datový tok i pro nový kodér.
+                if (heatAuto && heatLevel > 0) nv.setBitrate((nv.plan.bitrate * SizeMath.coolBitrateFactor(heatLevel)).toInt())
                 info = describe(nv)
                 main.post {
                     updateNotification()
@@ -853,25 +923,55 @@ class CaptureService : Service() {
             }
         }
 
-        /** Nový stupeň tepla: zahřátí hned, ochlazení po minutě klidu (Heat.next). */
+        /** Předpověď teploty od systému (Android 11+; ne každý telefon ji má - pak NaN). */
+        private fun readHeadroom() {
+            if (Build.VERSION.SDK_INT < 30) return
+            headroom = try {
+                getSystemService(PowerManager::class.java)?.getThermalHeadroom(30) ?: Float.NaN
+            } catch (_: Exception) {
+                Float.NaN
+            }
+        }
+
+        /**
+         * Nový stupeň tepla: zahřátí hned, ochlazení po minutě klidu (Heat.next). Výchozí je jen
+         * upozornění (kvalita zůstane, jak si ji kdo nastavil); kvalitu ubírá jen zapnuté
+         * „Při zahřátí snížit kvalitu“ ([heatAuto]).
+         */
         private fun evaluateHeat() {
             if (stopped) return
             val measured = Heat.level(thermalStatus, batteryC)
             val (next, since) = Heat.next(heatLevel, measured, batteryC, lowerSince, SystemClock.elapsedRealtime())
             lowerSince = since
-            if (next != heatLevel) applyHeat(next)
+            if (next != heatLevel) {
+                if (heatAuto) applyHeat(next)
+                else {
+                    Log.w("teplota: stupeň $heatLevel -> $next (systém $thermalStatus, baterie ${batteryC ?: "?"} °C, rezerva ${if (headroom.isNaN()) "?" else "%.2f".format(headroom)}) - jen upozornění")
+                    heatLevel = next
+                }
+            }
+            val w = Heat.warning(heatLevel, headroom, heatWarn)
+            // Se snižováním kvality říct, proč je nižší - i po vychladnutí, dokud zůstává menší obraz.
+            val reduced = heatAuto && (heatLevel >= 1 || curShort < shortSide || curFps < fps)
+            val dot = maxOf(w, if (heatAuto && heatLevel >= 1) 1 else 0)
+            if (w != heatWarn || reduced != heatReduced || dot != heatDot) {
+                heatWarn = w
+                heatReduced = reduced
+                heatDot = dot
+                main.post { if (session === this) showHeat(w, reduced, dot) }
+            }
         }
 
         /**
-         * Horký telefon šetří: teplý = nižší datový tok, horký = menší obraz, 24 fps a kamera
-         * pauza, velmi horký = ještě menší a 20 fps. Po vychladnutí se vrátí datový tok a kamera;
-         * menší obraz zůstane do konce snímání - každé přenastavení kodéru začíná zásobník
-         * znovu (klip by po něm byl krátký), tak jen při zahřátí, ne tam a zpět.
+         * Jen se zapnutým „Při zahřátí snížit kvalitu“: teplý = nižší datový tok, horký = menší
+         * obraz, 24 fps a kamera pauza, velmi horký = ještě menší a 20 fps. Po vychladnutí se
+         * vrátí datový tok a kamera; menší obraz zůstane do konce snímání - každé přenastavení
+         * kodéru začíná zásobník znovu (klip by po něm byl krátký), tak jen při zahřátí.
          */
         private fun applyHeat(level: Int) {
             val prev = heatLevel
             heatLevel = level
-            Log.w("teplota: stupeň $prev -> $level (systém $thermalStatus, baterie ${batteryC ?: "?"} °C)")
+            Log.w("teplota: stupeň $prev -> $level (systém $thermalStatus, baterie ${batteryC ?: "?"} °C) - snižuje se kvalita")
             if (level >= 2 && prev < 2) camera?.suspend()
             if (level < 2 && prev >= 2) camera?.resume()
             val wantShort = minOf(curShort, SizeMath.coolShort(shortSide, level))
@@ -885,7 +985,6 @@ class CaptureService : Service() {
             }
             // Skládání s kamerou drží snímky celého klipu - jen podle kodéru, ne níž.
             comp?.setMaxFps(curFps)
-            if (level >= 1) addWarning(R.string.warn_hot) else removeWarning(R.string.warn_hot)
         }
 
         /** Konec: všechno uklidit na vlákně kine-pipe, pak [done]. */

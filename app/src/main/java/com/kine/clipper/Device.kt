@@ -194,9 +194,9 @@ object SizeMath {
     fun autoShort(low: Boolean, older: Boolean): Int = if (low) 480 else if (older) 540 else 720
 
     /**
-     * Horký telefon: kratší strana podle stupně (0 normální, 1 teplý, 2 horký, 3 velmi
-     * horký). Teplý jen ubere datový tok (rozměr stejný), horký o stupeň menší obraz,
-     * velmi horký o dva - nejméně 360p.
+     * Horký telefon (jen se zapnutým „Při zahřátí snížit kvalitu“): kratší strana podle
+     * stupně (0 normální, 1 teplý, 2 horký, 3 velmi horký). Teplý jen ubere datový tok
+     * (rozměr stejný), horký o stupeň menší obraz, velmi horký o dva - nejméně 360p.
      */
     fun coolShort(short: Int, level: Int): Int {
         if (level < 2) return short
@@ -221,12 +221,40 @@ object SizeMath {
         level >= 1 -> 0.75
         else -> 1.0
     }
+
+    /**
+     * Co telefon zvládá bez většího hřátí (kratší strana, snímky): slabý 480p30,
+     * starší 540p30, běžný 720p60, rychlý 1080p60.
+     */
+    fun comfort(low: Boolean, older: Boolean, high: Boolean): Pair<Int, Int> = when {
+        low -> 480 to 30
+        older -> 540 to 30
+        high -> 1080 to 60
+        else -> 720 to 60
+    }
+
+    /**
+     * Jak těžké je nastavení pro telefon - jen pro upozornění, nic se samo nemění:
+     * 0 v pohodě, 1 může víc hřát, 2 asi se bude přehřívat / poběží na méně fps.
+     * Zátěž = pixely × snímky proti [comfort]; kamera v klipu přidá ~25 %.
+     */
+    fun loadLevel(short: Int, fps: Int, camera: Boolean, low: Boolean, older: Boolean, high: Boolean): Int {
+        val (cs, cf) = comfort(low, older, high)
+        val k = short.toDouble() / cs
+        val rel = k * k * fps / cf * (if (camera) 1.25 else 1.0)
+        return when {
+            rel >= 1.75 -> 2
+            rel >= 1.3 -> 1
+            else -> 0
+        }
+    }
 }
 
 /**
  * Jak horký je telefon (čistý výpočet - jde ověřit mimo telefon). Bere stav teploty od
  * systému (PowerManager, Android 10+, ne každý telefon ho hlásí) a teplotu baterie
- * (hlásí každý telefon) - platí vyšší z obou.
+ * (hlásí každý telefon) - platí vyšší z obou. Výchozí je jen upozornění ([warning]);
+ * kvalitu ubírá ([SizeMath.coolShort] a spol.) jen se zapnutým „Při zahřátí snížit kvalitu“.
  */
 object Heat {
     /** Stav systému (PowerManager.THERMAL_STATUS_*) a baterie (°C, null = nevíme) -> stupeň 0-3. */
@@ -271,5 +299,21 @@ object Heat {
         if (!coolEnough(current, batteryC)) return current to 0L
         val since = if (lowerSince == 0L) now else lowerSince
         return if (now - since >= COOL_DOWN_MS) (current - 1) to 0L else current to since
+    }
+
+    /**
+     * Upozornění (kvalita se nemění): 0 nic, 1 horký (hra i klip můžou zpomalit), 2 velmi
+     * horký (Android může nahrávání zpomalit nebo zastavit). Teplý telefon (stupeň 1,
+     * baterie od 40 °C - při hraní běžné) se neohlašuje. [headroom] = předpověď systému
+     * (PowerManager.getThermalHeadroom, 1,0 = začátek silného přiškrcení, NaN = nehlásí):
+     * od 0,95 se upozorní dřív, ukázané upozornění zůstane, dokud neklesne pod 0,8.
+     */
+    fun warning(level: Int, headroom: Float, shown: Int): Int {
+        if (level >= 3) return 2
+        if (level >= 2) return 1
+        val h = if (headroom.isNaN()) 0f else headroom
+        if (h >= 0.95f) return 1
+        if (shown >= 1 && h >= 0.8f) return 1
+        return 0
     }
 }
