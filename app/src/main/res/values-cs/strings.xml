@@ -165,4 +165,17 @@
     <string name="toast_very_hot">Telefon je moc horký - Android může nahrávání zpomalit</string>
     <string name="toast_hot_auto">Kvůli horku Kine ubralo kvalitu</string>
     <string name="ok">OK</string>
+    <!-- Nahrání na Kine: zpracování a viditelnost (0.4.2) -->
+    <string name="upload_who_sees">Kdo klip na Kine uvidí?</string>
+    <string name="vis_public_long">Veřejné - uvidí všichni</string>
+    <string name="vis_subscribers_long">Jen odběratelé</string>
+    <string name="vis_private_long">Soukromé - jen ty</string>
+    <string name="vis_private_only_you">Soukromé (vidíš jen ty)</string>
+    <string name="upload_state_processing">Na Kine · zpracovává se…</string>
+    <string name="upload_state_done_vis">Na Kine · %1$s</string>
+    <string name="upload_processing">Kine zpracovává klip…</string>
+    <string name="upload_failed_processing">Kine klip nezpracovala - nahraj ho znovu</string>
+    <string name="upload_gone">Na Kine smazané - můžeš ho nahrát znovu</string>
+    <string name="upload_interrupted">Nahrávání se přerušilo - zkus to znovu</string>
+    <string name="visibility_hint">Soukromé = klip na Kine vidíš jen ty (ostatní ho nenajdou). Volí se i při nahrání klipu.</string>
 </resources>

@@ -94,6 +94,9 @@ class MainActivity : Activity() {
     private var askedPermissions = false
     private var overlayAsked = false
     private var renderPosted = false
+    @Volatile private var readyCheckRunning = false
+    /** Volba viditelnosti v Nastavení (obnoví se, když ji změní okno při nahrání). */
+    private var visibilityControl: View? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) = scheduleRender()
@@ -138,6 +141,35 @@ class MainActivity : Activity() {
         main.post(ticker)
         // Klipy, které zůstaly ve frontě (nahrávání z pozadí Android nedovolil), poslat teď.
         if (settings.loggedIn && !UploadService.active && library.queued().isNotEmpty()) UploadService.kick(this)
+        checkUploadedClips()
+    }
+
+    /**
+     * Nahrané klipy, o kterých appka ještě neví, že je Kine zpracovala (nahrané v 0.4.1 a dřív,
+     * nebo když služba nedočkala): zeptat se jednou při otevření. Teprve zpracované video je na
+     * Kine vidět - dotaz ho na Kine i přepne na hotové.
+     */
+    private fun checkUploadedClips() {
+        if (readyCheckRunning || UploadService.active) return
+        val pending = library.awaitingReady().take(20)
+        if (pending.isEmpty()) return
+        readyCheckRunning = true
+        Thread({
+            try {
+                for (c in pending) {
+                    val id = c.kineVideoId() ?: continue
+                    val st = try { api.status(id) } catch (_: Exception) { continue }
+                    when (st) {
+                        "ready" -> library.update(c.id) { it.ready = true; it.kineId = id }
+                        "failed" -> library.update(c.id) { it.uploadState = "error"; it.error = getString(R.string.upload_failed_processing) }
+                        // Na Kine smazané: chyba (ručně jde nahrát znovu, automatické nahrávání ho nevezme).
+                        "not-found" -> library.update(c.id) { it.uploadState = "error"; it.error = getString(R.string.upload_gone); it.url = null; it.kineId = null; it.ready = false }
+                    }
+                }
+            } finally {
+                readyCheckRunning = false
+            }
+        }, "kine-ready").start()
     }
 
     override fun onResume() {
@@ -921,10 +953,7 @@ class MainActivity : Activity() {
         kine.addView(ui.text(getString(R.string.login_hint), 12f, Palette.FAINT), ui.matchWrap().apply { topMargin = ui.dp(6); bottomMargin = ui.dp(4) })
         kine.addView(ui.divider())
         kine.addView(ui.switchRow(getString(R.string.auto_upload), null, settings.autoUpload, getString(R.string.auto_upload_hint)) { settings.autoUpload = it })
-        val vis = listOf("public", "subscribers", "private")
-        kine.addView(ui.field(getString(R.string.visibility), ui.segmented(listOf(getString(R.string.vis_public), getString(R.string.vis_subscribers), getString(R.string.vis_private)), vis.indexOf(settings.visibility).coerceAtLeast(0)) { i ->
-            settings.visibility = vis[i]
-        }))
+        kine.addView(ui.field(getString(R.string.visibility), visibilitySegments().also { visibilityControl = it }, getString(R.string.visibility_hint)))
         if (settings.debuggable) {
             // Jen testovací sestavení: jiná adresa Kine (ostré mluví jen s playkine.com).
             kine.addView(ui.field(getString(R.string.site_url), EditText(this).apply {
@@ -996,14 +1025,66 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Nahrát na Kine: nejdřív kdo klip uvidí (předvybraná poslední volba, ta platí i pro
+     * automatické nahrávání). Soukromý klip ostatní na Kine neuvidí - dřív to nebylo
+     * nikde poznat a vypadalo to, že se klip na Kine „neukázal“.
+     */
     private fun upload(c: Clip) {
         if (!settings.loggedIn) {
             Toast.makeText(this, R.string.need_login, Toast.LENGTH_SHORT).show()
             startLogin()
             return
         }
-        library.update(c.id) { it.uploadState = "queued"; it.error = null }
-        UploadService.kick(this)
+        val values = listOf("public", "subscribers", "private")
+        val labels = arrayOf(getString(R.string.vis_public_long), getString(R.string.vis_subscribers_long), getString(R.string.vis_private_long))
+        var picked = values.indexOf(settings.visibility).coerceAtLeast(0)
+        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle(R.string.upload_who_sees)
+            .setSingleChoiceItems(labels, picked) { _, which -> picked = which }
+            .setPositiveButton(R.string.upload) { _, _ ->
+                val vis = values[picked]
+                settings.visibility = vis
+                refreshVisibilityControl()
+                // Mezitím ho mohlo vzít automatické nahrávání - pak znovu ne (duplikát na Kine).
+                var queued = false
+                library.update(c.id) {
+                    if (it.uploadState == "none" || it.uploadState == "error") {
+                        it.uploadState = "queued"; it.error = null; it.visibility = vis
+                        queued = true
+                    }
+                }
+                if (queued) UploadService.kick(this)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** Volba viditelnosti v Nastavení (stejná hodnota jako předvybraná v okně při nahrání). */
+    private fun visibilitySegments(): View {
+        val vis = listOf("public", "subscribers", "private")
+        return ui.segmented(listOf(getString(R.string.vis_public), getString(R.string.vis_subscribers), getString(R.string.vis_private)), vis.indexOf(settings.visibility).coerceAtLeast(0)) { i ->
+            settings.visibility = vis[i]
+        }
+    }
+
+    /** Okno při nahrání změnilo viditelnost - ať Nastavení ukazuje totéž (platí i pro automatické nahrávání). */
+    private fun refreshVisibilityControl() {
+        val old = visibilityControl ?: return
+        val parent = old.parent as? ViewGroup ?: return
+        val index = parent.indexOfChild(old)
+        val fresh = visibilitySegments()
+        parent.removeViewAt(index)
+        parent.addView(fresh, index, old.layoutParams)
+        visibilityControl = fresh
+    }
+
+    /** Krátce, kdo klip na Kine vidí (soukromý = jen ty). */
+    private fun visibilityLabel(v: String?): String? = when (v) {
+        "public" -> getString(R.string.vis_public)
+        "subscribers" -> getString(R.string.vis_subscribers)
+        "private" -> getString(R.string.vis_private_only_you)
+        else -> null
     }
 
     private fun share(c: Clip) {
@@ -1059,7 +1140,12 @@ class MainActivity : Activity() {
             val (stateText, stateColor) = when (c.uploadState) {
                 "queued" -> getString(R.string.upload_state_queued) to Palette.AMBER
                 "uploading" -> getString(R.string.upload_state_uploading, c.uploadPercent) to Palette.AMBER
-                "done" -> getString(R.string.upload_state_done) to Palette.GREEN
+                // Na Kine vidět až po zpracování; pak i komu (soukromý klip ostatní nevidí).
+                "done" -> when {
+                    // (Nahrané před víc než 30 dny se appka už neptá - pak jen „Na Kine“.)
+                    !c.ready && c.recentlyUploaded() -> getString(R.string.upload_state_processing) to Palette.AMBER
+                    else -> (visibilityLabel(c.visibility)?.let { getString(R.string.upload_state_done_vis, it) } ?: getString(R.string.upload_state_done)) to Palette.GREEN
+                }
                 "error" -> getString(R.string.upload_state_error, c.error ?: "") to Palette.RED
                 else -> "" to Palette.DIM
             }

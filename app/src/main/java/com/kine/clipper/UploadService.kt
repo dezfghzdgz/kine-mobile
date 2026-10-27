@@ -7,12 +7,17 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.IBinder
+import android.os.SystemClock
 import java.io.FileInputStream
 
 /**
  * Nahrávání klipů na Kine na pozadí (služba na popředí s průběhem v oznámení):
  * lístek od Kine, soubor po kusech (tus) do Cloudflare Stream, potvrzení,
  * pak Kine video zpracuje. Fronta = klipy se stavem "queued" v knihovně.
+ *
+ * Po nahrání se služba doptává, až je video na Kine zpracované (s id videa
+ * NA KINE - do 0.4.1 se ptala s id od Cloudflare, Kine video nenašla a klip
+ * zůstal viset jako „zpracovává se“: u Cloudflare byl, na Kine nikde).
  */
 class UploadService : Service() {
     companion object {
@@ -22,6 +27,8 @@ class UploadService : Service() {
         private const val CHUNK_LOW = 5 * 1024 * 1024
         @Volatile var active = false
             private set
+        /** Jak dlouho po nahrání čekat, až Kine klip zpracuje (krátký klip ~10-60 s). */
+        private const val READY_WAIT_MS = 10 * 60 * 1000L
 
         /**
          * Spustit frontu. Android 12+ nedovolí službu na popředí spustit z pozadí (např. Stop
@@ -38,6 +45,8 @@ class UploadService : Service() {
 
     private var thread: Thread? = null
     @Volatile private var stopRequested = false
+    /** Klipy nahrané v tomhle běhu, na které se čeká, až je Kine zpracuje. */
+    private val watching = LinkedHashSet<String>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,8 +71,13 @@ class UploadService : Service() {
         val lib = Library.get(this)
         try {
             while (!stopRequested) {
-                val next = lib.queued().lastOrNull() ?: break
-                uploadOne(api, lib, next, settings)
+                val next = lib.queued().lastOrNull()
+                if (next != null) {
+                    uploadOne(api, lib, next, settings)
+                    continue
+                }
+                // Fronta je prázdná: počkat, až Kine nahrané klipy zpracuje (nebo přibude další klip).
+                if (!waitReady(api, lib)) break
             }
         } finally {
             active = false
@@ -80,9 +94,78 @@ class UploadService : Service() {
         }
     }
 
+    /**
+     * Doptává se Kine, až nahrané klipy zpracuje (stav „ready“ - teprve pak jsou na Kine
+     * vidět). Po 5 s, později po 15 s, nejvýš [READY_WAIT_MS]. True = mezitím přibyl další
+     * klip ve frontě (nahrávat dál), false = konec.
+     */
+    private fun waitReady(api: KineApi, lib: Library): Boolean {
+        if (watching.isEmpty()) return false
+        progress(getString(R.string.upload_processing), -1)
+        val until = SystemClock.elapsedRealtime() + READY_WAIT_MS
+        var round = 0
+        while (!stopRequested && watching.isNotEmpty() && SystemClock.elapsedRealtime() < until) {
+            if (lib.queued().isNotEmpty()) return true
+            Thread.sleep(if (round < 12) 5000L else 15000L)
+            round++
+            for (id in watching.toList()) {
+                if (stopRequested) break
+                val c = lib.get(id)
+                val kineId = c?.kineVideoId()
+                if (c == null || kineId == null || c.uploadState != "done") {
+                    watching.remove(id)
+                    continue
+                }
+                val st = try { api.status(kineId) } catch (_: Exception) { continue }
+                when (st) {
+                    "ready" -> {
+                        watching.remove(id)
+                        lib.update(id) { it.ready = true }
+                        Log.i("Kine klip zpracovala: ${c.title}")
+                    }
+                    "failed" -> {
+                        watching.remove(id)
+                        lib.update(id) { it.uploadState = "error"; it.error = getString(R.string.upload_failed_processing) }
+                        Log.w("Kine klip nezpracovala: ${c.title}")
+                    }
+                    "not-found" -> {
+                        // Na Kine smazané: chyba (ručně jde nahrát znovu) - automatické nahrávání bere jen
+                        // nenahrané klipy, smazaný klip by jinak sám šel na Kine znovu.
+                        watching.remove(id)
+                        lib.update(id) { it.uploadState = "error"; it.error = getString(R.string.upload_gone); it.url = null; it.kineId = null; it.ready = false }
+                    }
+                }
+            }
+        }
+        if (watching.isNotEmpty()) Log.w("Kine klipy ještě zpracovává (${watching.size}) - appka se zeptá znovu po otevření")
+        watching.clear()
+        return !stopRequested && lib.queued().isNotEmpty()
+    }
+
+    /**
+     * Uložení na Kine. Výpadek sítě / chyba serveru = zkusit znovu (Kine potvrzení stejného
+     * nahrání vrátí totéž video - nic se nezdvojí); jinak by soubor u Cloudflare zůstal
+     * neuložený a nové nahrání by udělalo duplikát.
+     */
+    private fun confirmWithRetry(api: KineApi, clip: Clip, visibility: String): String {
+        var attempt = 0
+        while (true) {
+            try {
+                return api.confirm(clip, visibility)
+            } catch (e: Exception) {
+                val transient = e !is KineApiError || e.status >= 500 || e.status == 429
+                attempt++
+                if (!transient || attempt >= 4 || stopRequested) throw e
+                Log.w("uložení na Kine nevyšlo (${e.message}) - znovu za chvíli")
+                Thread.sleep(4000L * attempt)
+            }
+        }
+    }
+
     private fun uploadOne(api: KineApi, lib: Library, clip: Clip, settings: Settings) {
         lib.update(clip.id) { it.uploadState = "uploading"; it.uploadPercent = 0; it.error = null }
         progress(clip.title, 0)
+        var confirmed = false
         try {
             val uri = Uri.parse(clip.uri)
             val pfd = contentResolver.openFileDescriptor(uri, "r") ?: throw IllegalStateException("file missing")
@@ -136,30 +219,31 @@ class UploadService : Service() {
                 }
                 progress(getString(R.string.upload_confirming), 100)
                 val fresh = lib.get(clip.id) ?: clip
-                val id = api.confirm(fresh, settings.visibility)
+                val visibility = fresh.visibility ?: settings.visibility
+                val id = confirmWithRetry(api, fresh, visibility)
+                confirmed = true
                 val url = "${settings.siteUrl}/watch/$id"
-                lib.update(clip.id) { it.uploadState = "done"; it.uploadPercent = 100; it.url = url }
-                Log.i("nahráno: ${clip.title} -> $url")
-                // Zpracování u Cloudflare chvíli trvá - zeptat se párkrát, ať se video na Kine objeví (stav 'ready' nastavuje Kine při dotazu).
-                for (i in 0 until 24) {
-                    if (stopRequested) break
-                    try {
-                        if (api.status(target.videoId) == "ready") break
-                    } catch (_: Exception) {
-                        // další pokus
-                    }
-                    Thread.sleep(5000)
+                lib.update(clip.id) {
+                    it.uploadState = "done"; it.uploadPercent = 100; it.url = url
+                    it.kineId = id; it.ready = false; it.visibility = visibility; it.error = null
+                    it.uploadedAt = System.currentTimeMillis()
                 }
+                Log.i("nahráno ($visibility): ${clip.title} -> $url")
+                // Zpracování u Cloudflare chvíli trvá - na stav se služba doptá, až nahraje celou frontu (waitReady).
+                watching.add(clip.id)
             }
         } catch (e: Throwable) {
             Log.e("nahrávání ${clip.title}", e)
+            // Video už je na Kine uložené - chyba až potom klip nerozbije.
+            if (confirmed) return
             val msg = e.message ?: "error"
             lib.update(clip.id) { it.uploadState = "error"; it.error = msg }
             if (e is KineApiError && e.status == 401) {
                 // Odhlášeno - ostatní ve frontě by dopadly stejně.
                 for (c in lib.queued()) lib.update(c.id) { it.uploadState = "error"; it.error = msg }
             }
-            clip.videoId?.let { id -> try { api.cancelUpload(id) } catch (_: Exception) { } }
+            // Nepovedené nahrání ať na Kine nedrží místo; uložené video (potvrzené) se nikdy neruší.
+            if (!confirmed) clip.videoId?.let { id -> try { api.cancelUpload(id) } catch (_: Exception) { } }
         }
     }
 

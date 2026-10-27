@@ -215,14 +215,15 @@ class KineApi(private val context: Context, private val settings: Settings) {
 
     fun confirm(clip: Clip, visibility: String): String {
         val body = JSONObject()
-            .put("title", clip.title.take(150))
-            .put("description", "")
+            .put("title", clip.title.trim().take(150).ifEmpty { "Clip" })
+            .put("description", "Clip · Kine")
             .put("cloudflareVideoId", clip.videoId)
             .put("madeForKids", false)
             .put("hasPaidPromotion", false)
             .put("isAiGenerated", false)
             .put("language", Locale.getDefault().language.ifEmpty { "en" })
-            .put("category", "gaming")
+            // Klíč kategorie jako na webu a v appce do PC ("gaming" Kine neznala - klip nebyl v Hrách).
+            .put("category", "catGaming")
             .put("visibility", visibility)
             .put("isPremiere", false)
             .put("scheduledAt", JSONObject.NULL)
@@ -230,14 +231,18 @@ class KineApi(private val context: Context, private val settings: Settings) {
             .put("height", clip.height)
             .put("chapters", JSONArray())
             .put("captions", JSONArray())
-            .put("hashtags", JSONArray())
+            .put("hashtags", JSONArray().put("klip"))
         val j = jsonCall("${settings.siteUrl}/api/videos/confirm", "POST", body, token(), timeoutMs = 60_000)
         val id = j.optJSONObject("video")?.optString("id") ?: ""
         if (id.isEmpty()) throw KineApiError("Kine did not save the video.", 500)
         return id
     }
 
-    /** "ready" / "processing" / "not-found". */
+    /**
+     * Stav videa na Kine: "ready" / "processing" / "failed" / "not-found". [videoId] = id videa
+     * NA KINE (z potvrzení). Do 0.4.1 se sem posílalo id od Cloudflare - Kine video nenašla,
+     * nikdo ho nepřepnul na hotové a na Kine nebylo vidět (u Cloudflare ano).
+     */
     fun status(videoId: String): String {
         val c = open("${settings.siteUrl}/api/videos/status", "POST")
         c.doOutput = true
@@ -251,7 +256,11 @@ class KineApi(private val context: Context, private val settings: Settings) {
         c.disconnect()
         if (status == 404) return "not-found"
         if (status >= 400) throw KineApiError("Kine answered $status.", status)
-        return if (JSONObject(text).optString("status") == "ready") "ready" else "processing"
+        return when (try { JSONObject(text).optString("status") } catch (_: Exception) { "" }) {
+            "ready" -> "ready"
+            "failed" -> "failed"
+            else -> "processing"
+        }
     }
 
     fun cancelUpload(videoId: String) {

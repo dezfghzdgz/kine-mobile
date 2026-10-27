@@ -138,6 +138,25 @@ zbytečně přišel o kvalitu), jen upozorní:
   stáhlo 60 na 30) - jen upozorní. Čistý výpočet `Heat` / `SizeMath` jde ověřit mimo
   telefon.
 
+### Nahrání na Kine (0.4.2)
+
+- **Oprava „klip je u Cloudflare, ale na Kine není“**: po nahrání se appka ptala na stav
+  videa s id od Cloudflare místo id na Kine - Kine video nenašla, nikdo ho nepřepnul na
+  hotové a klip visel jako „zpracovává se“ (na Kine nikde). Teď se ptá s id na Kine
+  (`Clip.kineId`, u starších klipů z adresy `/watch/<id>`), po nahrání celé fronty
+  (5 s, pak 15 s, nejvýš 10 min) a znovu při otevření appky (až 20 klipů). Web přijme
+  i id od Cloudflare, takže to spraví i nainstalovanou 0.4.1.
+- **Kdo klip uvidí**: před nahráním okno Veřejné / Jen odběratelé / Soukromé (předvybraná
+  poslední volba, platí i pro automatické nahrávání). U klipu je pak „Na Kine · zpracovává
+  se…“ a po zpracování „Na Kine · Veřejné“ / „· Soukromé (vidíš jen ty)“ - soukromý klip
+  ostatní na Kine neuvidí.
+- Kategorie `catGaming` (dřív „gaming“, Kine ji neznala) a hashtag „klip“ jako z PC;
+  potvrzené video se při chybě až potom nikdy neruší, uložení na Kine se při výpadku sítě
+  zkusí znovu (stejné nahrání vrátí totéž video - žádný duplikát).
+- Na Kine smazaný klip = „Na Kine smazané - můžeš ho nahrát znovu“ (automatické nahrávání
+  ho samo znovu neposílá); nahrávání přerušené zavřením appky už nevisí na „Nahrává se %“.
+- Appka se ptá na klipy nahrané do 30 dní (počítá se od nahrání, `Clip.uploadedAt`).
+
 ## Co zatím chybí / omezení
 
 - Klip hned po otočení telefonu obsahuje jen část od otočení (kousky s jiným

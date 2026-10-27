@@ -165,4 +165,17 @@
     <string name="toast_very_hot">Phone is very hot - Android may slow down the recording</string>
     <string name="toast_hot_auto">Kine lowered the quality because of heat</string>
     <string name="ok">OK</string>
+    <!-- Nahrání na Kine: zpracování a viditelnost (0.4.2) -->
+    <string name="upload_who_sees">Who can see the clip on Kine?</string>
+    <string name="vis_public_long">Public - everyone</string>
+    <string name="vis_subscribers_long">Subscribers only</string>
+    <string name="vis_private_long">Private - only you</string>
+    <string name="vis_private_only_you">Private (only you)</string>
+    <string name="upload_state_processing">On Kine · processing…</string>
+    <string name="upload_state_done_vis">On Kine · %1$s</string>
+    <string name="upload_processing">Kine is processing the clip…</string>
+    <string name="upload_failed_processing">Kine couldn\'t process the clip - upload it again</string>
+    <string name="upload_gone">Deleted on Kine - you can upload it again</string>
+    <string name="upload_interrupted">Upload was interrupted - try again</string>
+    <string name="visibility_hint">Private = only you see the clip on Kine (others won\'t find it). You also pick this when uploading a clip.</string>
 </resources>
